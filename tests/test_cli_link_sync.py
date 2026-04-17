@@ -7,14 +7,11 @@ import time
 
 import pytest
 
-from src.ghstars.cli import (
-    ArxivSyncWindow,
-    _resolve_sync_links_concurrency,
-    _run_audit_parity,
-    _run_enrich_repos,
-    _run_export_csv,
-    _run_sync_links,
-)
+from src.ghstars.cli import ArxivSyncWindow, _resolve_sync_links_concurrency
+from src.ghstars.commands.audit_parity import _run_audit_parity
+from src.ghstars.commands.enrich_repos import _run_enrich_repos
+from src.ghstars.commands.export_csv import _run_export_csv
+from src.ghstars.commands.sync_links import _run_sync_links
 from src.ghstars.models import GitHubRepoMetadata, Paper
 from src.ghstars.storage.db import Database
 from src.ghstars.storage.raw_cache import RawCacheStore

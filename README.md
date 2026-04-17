@@ -50,7 +50,6 @@ It does **not** try to be:
 - a best-effort heuristic linker that guesses when evidence is weak
 
 If an exact source does not provide a trustworthy repo signal, the project prefers `not_found` or `ambiguous` over a risky match.
-Older scripts under `scripts/` may capture historical experiments, but the supported `main.py` workflow remains exact-match only.
 
 ## Install
 
@@ -200,12 +199,6 @@ uv run main.py --help
 uv sync --dev
 uv run pytest
 ```
-
-## Historical scripts
-
-The supported workflow is the `main.py` CLI shown above.
-Older one-off scripts under `scripts/` may reflect historical experiments.
-For example, `scripts/run_december_2025_pipeline.py` includes title-search fallbacks and is not representative of the current exact-match-only CLI.
 
 ## Design principles
 

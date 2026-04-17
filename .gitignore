@@ -6,3 +6,4 @@ data/
 output/
 *.pyc
 .DS_Store
+.worktrees

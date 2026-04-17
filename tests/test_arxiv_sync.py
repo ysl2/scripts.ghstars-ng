@@ -5,15 +5,13 @@ from types import SimpleNamespace
 
 import pytest
 
-from src.ghstars.cli import (
+from src.ghstars.cli import ArxivSyncWindow, _resolve_arxiv_sync_window, async_main
+from src.ghstars.commands.sync_arxiv import (
     ARXIV_PAGE_SIZE,
-    ArxivSyncWindow,
     ArxivWindowSyncIncompleteError,
     _build_arxiv_window_search_query,
-    _resolve_arxiv_sync_window,
     _run_sync_arxiv,
     _sync_arxiv_category_by_window,
-    async_main,
 )
 from src.ghstars.net.http import RateLimiter, request_text
 from src.ghstars.storage.db import Database
