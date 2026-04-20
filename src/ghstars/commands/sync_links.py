@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import asyncio
+from dataclasses import dataclass
+from datetime import datetime, timedelta, timezone
 import uuid
 
 from src.ghstars import cli as cli_module
@@ -8,12 +10,10 @@ from src.ghstars.associate.resolver import build_final_links
 from src.ghstars.commands._common import (
     _build_sync_owner_id,
     _ensure_paper_lease,
-    _has_found_repo,
     _heartbeat_paper_sync_lease,
     _list_papers_for_window,
     _persist_raw_response,
     _replace_surface_observations,
-    _try_reuse_exact_surface,
 )
 from src.ghstars.models import Paper, PaperSyncLease
 from src.ghstars.providers.alphaxiv_links import (
@@ -29,6 +29,17 @@ from src.ghstars.providers.huggingface_links import (
 )
 from src.ghstars.storage.db import Database, LeaseLostError
 from src.ghstars.storage.raw_cache import RawCacheStore
+
+
+LINK_SYNC_TTL = timedelta(days=7)
+LINK_SYNC_FOUND = "found"
+LINK_SYNC_NOT_FOUND = "not_found"
+
+
+@dataclass(frozen=True)
+class LinkSyncAttempt:
+    found: bool
+    complete: bool
 
 
 async def _run_sync_links(
@@ -116,26 +127,92 @@ async def _sync_links_for_paper(
     stop_heartbeat = asyncio.Event()
     heartbeat_task = asyncio.create_task(_heartbeat_paper_sync_lease(database, lease, stop_heartbeat))
     try:
-        await _sync_arxiv_link_surfaces(database, raw_cache, arxiv_links, paper.arxiv_id, paper.comment, paper.title, lease)
+        previous_links = database.list_paper_repo_links(paper.arxiv_id)
+        arxiv_attempt = await _sync_arxiv_link_surfaces(
+            database,
+            raw_cache,
+            arxiv_links,
+            paper.arxiv_id,
+            paper.comment,
+            paper.title,
+            lease,
+        )
         _ensure_paper_lease(database, lease)
         observations = database.list_repo_observations(paper.arxiv_id)
-        if not _has_found_repo(observations):
-            await _sync_huggingface_exact_surfaces(database, raw_cache, huggingface, paper.arxiv_id, paper.title, lease)
-            _ensure_paper_lease(database, lease)
-            observations = database.list_repo_observations(paper.arxiv_id)
-        if not _has_found_repo(observations):
-            await _sync_alphaxiv_link_surfaces(database, raw_cache, alphaxiv, paper.arxiv_id, paper.title, lease)
-            _ensure_paper_lease(database, lease)
-            observations = database.list_repo_observations(paper.arxiv_id)
+        if arxiv_attempt.found:
+            final_links = build_final_links(paper.arxiv_id, observations)
+            database.replace_paper_repo_links(
+                paper.arxiv_id,
+                final_links,
+                lease_owner_id=lease.owner_id,
+                lease_token=lease.lease_token,
+            )
+            database.upsert_paper_link_sync_state(
+                paper.arxiv_id,
+                LINK_SYNC_FOUND,
+                lease_owner_id=lease.owner_id,
+                lease_token=lease.lease_token,
+            )
+            print(f"{paper.arxiv_id}: {len(final_links)} final links")
+            return
 
-        final_links = build_final_links(paper.arxiv_id, observations)
-        database.replace_paper_repo_links(
+        link_sync_state = database.get_paper_link_sync_state(paper.arxiv_id)
+        if _is_link_sync_state_fresh(link_sync_state.checked_at if link_sync_state is not None else None):
+            final_links = build_final_links(paper.arxiv_id, observations)
+            database.replace_paper_repo_links(
+                paper.arxiv_id,
+                final_links,
+                lease_owner_id=lease.owner_id,
+                lease_token=lease.lease_token,
+            )
+            print(f"{paper.arxiv_id}: {len(final_links)} final links")
+            return
+
+        fallback_attempt = await _sync_fallback_exact_surfaces(
+            database,
+            raw_cache,
+            huggingface,
+            alphaxiv,
             paper.arxiv_id,
-            final_links,
-            lease_owner_id=lease.owner_id,
-            lease_token=lease.lease_token,
+            paper.title,
+            lease,
         )
-        print(f"{paper.arxiv_id}: {len(final_links)} final links")
+        _ensure_paper_lease(database, lease)
+        if fallback_attempt.found:
+            observations = database.list_repo_observations(paper.arxiv_id)
+            final_links = build_final_links(paper.arxiv_id, observations)
+            database.replace_paper_repo_links(
+                paper.arxiv_id,
+                final_links,
+                lease_owner_id=lease.owner_id,
+                lease_token=lease.lease_token,
+            )
+            database.upsert_paper_link_sync_state(
+                paper.arxiv_id,
+                LINK_SYNC_FOUND,
+                lease_owner_id=lease.owner_id,
+                lease_token=lease.lease_token,
+            )
+            print(f"{paper.arxiv_id}: {len(final_links)} final links")
+            return
+
+        if arxiv_attempt.complete and fallback_attempt.complete:
+            database.replace_paper_repo_links(
+                paper.arxiv_id,
+                [],
+                lease_owner_id=lease.owner_id,
+                lease_token=lease.lease_token,
+            )
+            database.upsert_paper_link_sync_state(
+                paper.arxiv_id,
+                LINK_SYNC_NOT_FOUND,
+                lease_owner_id=lease.owner_id,
+                lease_token=lease.lease_token,
+            )
+            print(f"{paper.arxiv_id}: 0 final links")
+            return
+
+        print(f"{paper.arxiv_id}: partial refresh failed, kept {len(previous_links)} final links")
     except LeaseLostError:
         print(f"{paper.arxiv_id}: skipped after lease loss")
     finally:
@@ -156,7 +233,7 @@ async def _sync_arxiv_link_surfaces(
     comment: str | None,
     title: str,
     lease: PaperSyncLease | None = None,
-) -> None:
+) -> LinkSyncAttempt:
     comment_urls = extract_github_urls_from_comment(comment)
     _replace_surface_observations(
         database,
@@ -169,34 +246,10 @@ async def _sync_arxiv_link_surfaces(
         lease=lease,
     )
 
-    handled, _found, _cached_status = _try_reuse_exact_surface(
-        database,
-        raw_cache,
-        arxiv_id=arxiv_id,
-        provider="arxiv",
-        surface="abs_html",
-        extract_urls=extract_github_urls_from_abs_html,
-        lease=lease,
-    )
-    if handled:
-        return
-
     status, body, headers, error = await client.fetch_abs_html(arxiv_id)
     _ensure_paper_lease(database, lease)
     if error or status is None:
-        _replace_surface_observations(
-            database,
-            arxiv_id=arxiv_id,
-            provider="arxiv",
-            surface="abs_html",
-            urls=(),
-            evidence_text=title,
-            raw_cache_id=None,
-            empty_status="fetch_failed",
-            error_message=error or "empty response",
-            lease=lease,
-        )
-        return
+        return LinkSyncAttempt(found=bool(comment_urls), complete=False)
 
     raw_cache_id = _persist_raw_response(
         database,
@@ -221,6 +274,7 @@ async def _sync_arxiv_link_surfaces(
         raw_cache_id=raw_cache_id,
         lease=lease,
     )
+    return LinkSyncAttempt(found=bool(comment_urls or urls), complete=True)
 
 
 async def _sync_huggingface_exact_surfaces(
@@ -230,8 +284,8 @@ async def _sync_huggingface_exact_surfaces(
     arxiv_id: str,
     title: str,
     lease: PaperSyncLease | None = None,
-) -> None:
-    await _sync_huggingface_paper_surfaces(
+) -> LinkSyncAttempt:
+    return await _sync_huggingface_paper_surfaces(
         database,
         raw_cache,
         client,
@@ -255,77 +309,40 @@ async def _sync_huggingface_paper_surfaces(
     payload_surface: str,
     html_surface: str,
     lease: PaperSyncLease | None = None,
-) -> None:
-    handled, found, cached_status = _try_reuse_exact_surface(
+) -> LinkSyncAttempt:
+    payload_complete = True
+    status, body, headers, error = await client.fetch_paper_payload(fetch_paper_id)
+    _ensure_paper_lease(database, lease)
+    raw_cache_id = _persist_raw_response(
         database,
         raw_cache,
-        arxiv_id=source_paper_id,
         provider="huggingface",
-        surface=payload_surface,
-        extract_urls=extract_github_url_from_hf_payload,
-        lease=lease,
+        surface="paper_api",
+        request_key=f"paper_api:{fetch_paper_id}",
+        request_url=f"https://huggingface.co/api/papers/{fetch_paper_id}",
+        status=status,
+        headers=headers,
+        body=body,
     )
-    if handled:
-        if found:
-            return
-        if cached_status == 404:
-            return
+    _ensure_paper_lease(database, lease)
+    if error and status != 404:
+        payload_complete = False
     else:
-        status, body, headers, error = await client.fetch_paper_payload(fetch_paper_id)
-        _ensure_paper_lease(database, lease)
-        raw_cache_id = _persist_raw_response(
+        payload_urls = extract_github_url_from_hf_payload(body)
+        _replace_surface_observations(
             database,
-            raw_cache,
+            arxiv_id=source_paper_id,
             provider="huggingface",
-            surface="paper_api",
-            request_key=f"paper_api:{fetch_paper_id}",
-            request_url=f"https://huggingface.co/api/papers/{fetch_paper_id}",
-            status=status,
-            headers=headers,
-            body=body,
+            surface=payload_surface,
+            urls=payload_urls,
+            evidence_text=body if body is not None else title,
+            raw_cache_id=raw_cache_id,
+            lease=lease,
         )
-        _ensure_paper_lease(database, lease)
-        if error and status != 404:
-            _replace_surface_observations(
-                database,
-                arxiv_id=source_paper_id,
-                provider="huggingface",
-                surface=payload_surface,
-                urls=(),
-                evidence_text=title,
-                raw_cache_id=raw_cache_id,
-                empty_status="fetch_failed",
-                error_message=error,
-                lease=lease,
-            )
-        else:
-            payload_urls = extract_github_url_from_hf_payload(body)
-            _replace_surface_observations(
-                database,
-                arxiv_id=source_paper_id,
-                provider="huggingface",
-                surface=payload_surface,
-                urls=payload_urls,
-                evidence_text=body if body is not None else title,
-                raw_cache_id=raw_cache_id,
-                lease=lease,
-            )
-            if payload_urls:
-                return
-            if status == 404:
-                return
-
-    handled, _found, _cached_status = _try_reuse_exact_surface(
-        database,
-        raw_cache,
-        arxiv_id=source_paper_id,
-        provider="huggingface",
-        surface=html_surface,
-        extract_urls=extract_github_url_from_hf_html,
-        lease=lease,
-    )
-    if handled:
-        return
+        if payload_urls:
+            return LinkSyncAttempt(found=True, complete=payload_complete)
+        if status == 404:
+            return LinkSyncAttempt(found=False, complete=payload_complete)
 
     status, body, headers, error = await client.fetch_paper_html(fetch_paper_id)
     _ensure_paper_lease(database, lease)
@@ -342,30 +359,20 @@ async def _sync_huggingface_paper_surfaces(
     )
     _ensure_paper_lease(database, lease)
     if error and status != 404:
-        _replace_surface_observations(
-            database,
-            arxiv_id=source_paper_id,
-            provider="huggingface",
-            surface=html_surface,
-            urls=(),
-            evidence_text=title,
-            raw_cache_id=raw_cache_id,
-            empty_status="fetch_failed",
-            error_message=error,
-            lease=lease,
-        )
-        return
+        return LinkSyncAttempt(found=False, complete=False)
 
+    html_urls = extract_github_url_from_hf_html(body)
     _replace_surface_observations(
         database,
         arxiv_id=source_paper_id,
         provider="huggingface",
         surface=html_surface,
-        urls=extract_github_url_from_hf_html(body),
+        urls=html_urls,
         evidence_text=body if body is not None else title,
         raw_cache_id=raw_cache_id,
         lease=lease,
     )
+    return LinkSyncAttempt(found=bool(html_urls), complete=payload_complete)
 
 
 async def _sync_alphaxiv_link_surfaces(
@@ -375,77 +382,40 @@ async def _sync_alphaxiv_link_surfaces(
     arxiv_id: str,
     title: str,
     lease: PaperSyncLease | None = None,
-) -> None:
-    handled, found, cached_status = _try_reuse_exact_surface(
+) -> LinkSyncAttempt:
+    payload_complete = True
+    status, body, headers, error = await client.fetch_paper_payload(arxiv_id)
+    _ensure_paper_lease(database, lease)
+    raw_cache_id = _persist_raw_response(
         database,
         raw_cache,
-        arxiv_id=arxiv_id,
         provider="alphaxiv",
         surface="paper_api",
-        extract_urls=extract_github_url_from_alphaxiv_payload,
-        lease=lease,
+        request_key=f"paper_api:{arxiv_id}",
+        request_url=f"https://api.alphaxiv.org/papers/v3/{arxiv_id}",
+        status=status,
+        headers=headers,
+        body=body,
     )
-    if handled:
-        if found:
-            return
-        if cached_status == 404:
-            return
+    _ensure_paper_lease(database, lease)
+    if error and status != 404:
+        payload_complete = False
     else:
-        status, body, headers, error = await client.fetch_paper_payload(arxiv_id)
-        _ensure_paper_lease(database, lease)
-        raw_cache_id = _persist_raw_response(
+        payload_urls = extract_github_url_from_alphaxiv_payload(body)
+        _replace_surface_observations(
             database,
-            raw_cache,
+            arxiv_id=arxiv_id,
             provider="alphaxiv",
             surface="paper_api",
-            request_key=f"paper_api:{arxiv_id}",
-            request_url=f"https://api.alphaxiv.org/papers/v3/{arxiv_id}",
-            status=status,
-            headers=headers,
-            body=body,
+            urls=payload_urls,
+            evidence_text=body if body is not None else title,
+            raw_cache_id=raw_cache_id,
+            lease=lease,
         )
-        _ensure_paper_lease(database, lease)
-        if error and status != 404:
-            _replace_surface_observations(
-                database,
-                arxiv_id=arxiv_id,
-                provider="alphaxiv",
-                surface="paper_api",
-                urls=(),
-                evidence_text=title,
-                raw_cache_id=raw_cache_id,
-                empty_status="fetch_failed",
-                error_message=error,
-                lease=lease,
-            )
-        else:
-            payload_urls = extract_github_url_from_alphaxiv_payload(body)
-            _replace_surface_observations(
-                database,
-                arxiv_id=arxiv_id,
-                provider="alphaxiv",
-                surface="paper_api",
-                urls=payload_urls,
-                evidence_text=body if body is not None else title,
-                raw_cache_id=raw_cache_id,
-                lease=lease,
-            )
-            if payload_urls:
-                return
-            if status == 404:
-                return
-
-    handled, _found, _cached_status = _try_reuse_exact_surface(
-        database,
-        raw_cache,
-        arxiv_id=arxiv_id,
-        provider="alphaxiv",
-        surface="paper_html",
-        extract_urls=extract_github_url_from_alphaxiv_html,
-        lease=lease,
-    )
-    if handled:
-        return
+        if payload_urls:
+            return LinkSyncAttempt(found=True, complete=payload_complete)
+        if status == 404:
+            return LinkSyncAttempt(found=False, complete=payload_complete)
 
     status, body, headers, error = await client.fetch_paper_html(arxiv_id)
     _ensure_paper_lease(database, lease)
@@ -462,27 +432,63 @@ async def _sync_alphaxiv_link_surfaces(
     )
     _ensure_paper_lease(database, lease)
     if error and status != 404:
-        _replace_surface_observations(
-            database,
-            arxiv_id=arxiv_id,
-            provider="alphaxiv",
-            surface="paper_html",
-            urls=(),
-            evidence_text=title,
-            raw_cache_id=raw_cache_id,
-            empty_status="fetch_failed",
-            error_message=error,
-            lease=lease,
-        )
-        return
+        return LinkSyncAttempt(found=False, complete=False)
 
+    html_urls = extract_github_url_from_alphaxiv_html(body)
     _replace_surface_observations(
         database,
         arxiv_id=arxiv_id,
         provider="alphaxiv",
         surface="paper_html",
-        urls=extract_github_url_from_alphaxiv_html(body),
+        urls=html_urls,
         evidence_text=body if body is not None else title,
         raw_cache_id=raw_cache_id,
         lease=lease,
     )
+    return LinkSyncAttempt(found=bool(html_urls), complete=payload_complete)
+
+
+async def _sync_fallback_exact_surfaces(
+    database: Database,
+    raw_cache: RawCacheStore,
+    huggingface: HuggingFaceLinksClient,
+    alphaxiv: AlphaXivLinksClient,
+    arxiv_id: str,
+    title: str,
+    lease: PaperSyncLease | None = None,
+) -> LinkSyncAttempt:
+    huggingface_attempt = await _sync_huggingface_exact_surfaces(
+        database,
+        raw_cache,
+        huggingface,
+        arxiv_id,
+        title,
+        lease,
+    )
+    if huggingface_attempt.found:
+        return huggingface_attempt
+
+    alphaxiv_attempt = await _sync_alphaxiv_link_surfaces(
+        database,
+        raw_cache,
+        alphaxiv,
+        arxiv_id,
+        title,
+        lease,
+    )
+    return LinkSyncAttempt(
+        found=alphaxiv_attempt.found,
+        complete=huggingface_attempt.complete and alphaxiv_attempt.complete,
+    )
+
+
+def _is_link_sync_state_fresh(checked_at: str | None) -> bool:
+    if not checked_at:
+        return False
+    try:
+        checked = datetime.fromisoformat(checked_at)
+    except ValueError:
+        return False
+    if checked.tzinfo is None:
+        checked = checked.replace(tzinfo=timezone.utc)
+    return datetime.now(timezone.utc) - checked < LINK_SYNC_TTL

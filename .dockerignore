@@ -1,0 +1,10 @@
+.git
+.gitignore
+.venv
+__pycache__
+.pytest_cache
+.DS_Store
+data
+runtime-data
+frontend/node_modules
+frontend/dist

@@ -1,0 +1,77 @@
+:root {
+  --bg: #eef2ee;
+  --surface: rgba(255, 255, 255, 0.8);
+  --surface-soft: #f8faf8;
+  --line: rgba(47, 65, 56, 0.12);
+  --line-strong: rgba(47, 65, 56, 0.18);
+  --text: #1f2824;
+  --muted: #68726d;
+  --accent: #1e5a49;
+  --shadow: 0 16px 40px rgba(34, 41, 37, 0.08);
+
+  --display: 'Iowan Old Style', 'Palatino Linotype', 'Book Antiqua', Georgia, serif;
+  --sans: 'IBM Plex Sans', 'Segoe UI', 'Helvetica Neue', sans-serif;
+  --mono: 'IBM Plex Mono', 'SFMono-Regular', 'SF Mono', Consolas, monospace;
+
+  color: var(--text);
+  background:
+    linear-gradient(180deg, #f5f7f4 0%, #edf1ec 100%);
+  font: 16px/1.55 var(--sans);
+  font-synthesis: none;
+  text-rendering: optimizeLegibility;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html {
+  scroll-behavior: smooth;
+}
+
+body {
+  margin: 0;
+  min-width: 320px;
+  min-height: 100vh;
+}
+
+#root {
+  position: relative;
+  min-height: 100vh;
+}
+
+a {
+  color: inherit;
+}
+
+h1,
+h2 {
+  margin: 0;
+  font-family: var(--display);
+  line-height: 0.95;
+  letter-spacing: -0.04em;
+}
+
+h1 {
+  font-size: clamp(2.2rem, 4.6vw, 3.8rem);
+}
+
+h2 {
+  font-size: clamp(1.2rem, 1.8vw, 1.55rem);
+}
+
+p {
+  margin: 0;
+}
+
+code {
+  font-family: var(--mono);
+}
+
+button,
+input,
+select {
+  font: inherit;
+}

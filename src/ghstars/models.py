@@ -76,6 +76,13 @@ class PaperRepoLink:
 
 
 @dataclass(frozen=True)
+class PaperLinkSyncState:
+    arxiv_id: str
+    status: str
+    checked_at: str
+
+
+@dataclass(frozen=True)
 class PaperSyncLease:
     arxiv_id: str
     owner_id: str

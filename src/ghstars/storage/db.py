@@ -7,10 +7,18 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
-from src.ghstars.models import GitHubRepoMetadata, Paper, PaperRepoLink, PaperSyncLease, RawCacheEntry, RepoObservation, ResourceLease
+from src.ghstars.models import (
+    GitHubRepoMetadata,
+    Paper,
+    PaperLinkSyncState,
+    PaperRepoLink,
+    PaperSyncLease,
+    RawCacheEntry,
+    RepoObservation,
+    ResourceLease,
+)
 
-
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 4
 
 
 class LeaseLostError(RuntimeError):
@@ -246,6 +254,41 @@ class Database:
                 ],
             )
 
+    def upsert_paper_link_sync_state(
+        self,
+        arxiv_id: str,
+        status: str,
+        *,
+        checked_at: str | None = None,
+        lease_owner_id: str | None = None,
+        lease_token: str | None = None,
+    ) -> None:
+        with self._write_transaction():
+            self._require_active_paper_sync_lease(
+                arxiv_id,
+                owner_id=lease_owner_id,
+                lease_token=lease_token,
+            )
+            self.connection.execute(
+                """
+                INSERT INTO paper_link_sync_state (arxiv_id, status, checked_at)
+                VALUES (?, ?, ?)
+                ON CONFLICT(arxiv_id) DO UPDATE SET
+                    status = excluded.status,
+                    checked_at = excluded.checked_at
+                """,
+                (arxiv_id, status, checked_at or _utc_now()),
+            )
+
+    def get_paper_link_sync_state(self, arxiv_id: str) -> PaperLinkSyncState | None:
+        row = self._fetchone(
+            "SELECT * FROM paper_link_sync_state WHERE arxiv_id = ?",
+            (arxiv_id,),
+        )
+        if row is None:
+            return None
+        return _to_paper_link_sync_state(row)
+
     def list_paper_repo_links(self, arxiv_id: str) -> list[PaperRepoLink]:
         rows = self._fetchall(
             "SELECT * FROM paper_repo_links WHERE arxiv_id = ? ORDER BY is_primary DESC, normalized_repo_url ASC",
@@ -265,7 +308,7 @@ class Database:
                     owner = excluded.owner,
                     repo = excluded.repo,
                     stars = excluded.stars,
-                    created_at = excluded.created_at,
+                    created_at = COALESCE(github_repos.created_at, excluded.created_at),
                     description = excluded.description,
                     checked_at = excluded.checked_at
                 """,
@@ -627,6 +670,8 @@ class Database:
                 self._migrate_to_v2()
             if current_version < 3:
                 self._migrate_to_v3()
+            if current_version < 4:
+                self._migrate_to_v4()
             self.connection.execute(
                 "INSERT INTO schema_meta (key, value) VALUES ('schema_version', ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value",
                 (str(SCHEMA_VERSION),),
@@ -748,6 +793,16 @@ class Database:
         )
         self.connection.execute(
             """
+            CREATE TABLE IF NOT EXISTS paper_link_sync_state (
+                arxiv_id TEXT PRIMARY KEY,
+                status TEXT NOT NULL,
+                checked_at TEXT NOT NULL,
+                FOREIGN KEY (arxiv_id) REFERENCES papers(arxiv_id) ON DELETE CASCADE
+            )
+            """
+        )
+        self.connection.execute(
+            """
             CREATE TABLE IF NOT EXISTS sync_state (
                 stream_name TEXT PRIMARY KEY,
                 cursor TEXT,
@@ -801,6 +856,18 @@ class Database:
         )
         self.connection.execute(
             "CREATE INDEX IF NOT EXISTS idx_resource_leases_expires_at ON resource_leases (lease_expires_at)"
+        )
+
+    def _migrate_to_v4(self) -> None:
+        self.connection.execute(
+            """
+            CREATE TABLE IF NOT EXISTS paper_link_sync_state (
+                arxiv_id TEXT PRIMARY KEY,
+                status TEXT NOT NULL,
+                checked_at TEXT NOT NULL,
+                FOREIGN KEY (arxiv_id) REFERENCES papers(arxiv_id) ON DELETE CASCADE
+            )
+            """
         )
 
     @contextmanager
@@ -963,6 +1030,14 @@ def _to_paper_repo_link(row: sqlite3.Row) -> PaperRepoLink:
         surface_count=int(row["surface_count"]),
         is_primary=bool(row["is_primary"]),
         resolved_at=row["resolved_at"],
+    )
+
+
+def _to_paper_link_sync_state(row: sqlite3.Row) -> PaperLinkSyncState:
+    return PaperLinkSyncState(
+        arxiv_id=row["arxiv_id"],
+        status=row["status"],
+        checked_at=row["checked_at"],
     )
 
 

@@ -1,0 +1,47 @@
+services:
+  db:
+    image: postgres:17-alpine
+    environment:
+      POSTGRES_DB: ghstars
+      POSTGRES_USER: ghstars
+      POSTGRES_PASSWORD: ghstars
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ghstars -d ghstars"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+
+  app:
+    build: .
+    env_file:
+      - .env
+    environment:
+      DATABASE_URL: postgresql+psycopg://ghstars:ghstars@db:5432/ghstars
+      DATA_DIR: /app/data
+    depends_on:
+      db:
+        condition: service_healthy
+    ports:
+      - "8000:8000"
+    volumes:
+      - runtime_data:/app/data
+
+  worker:
+    build: .
+    command: ["sh", "-lc", "uv run python main.py migrate && uv run python main.py worker"]
+    env_file:
+      - .env
+    environment:
+      DATABASE_URL: postgresql+psycopg://ghstars:ghstars@db:5432/ghstars
+      DATA_DIR: /app/data
+    depends_on:
+      db:
+        condition: service_healthy
+    volumes:
+      - runtime_data:/app/data
+
+volumes:
+  postgres_data:
+  runtime_data:

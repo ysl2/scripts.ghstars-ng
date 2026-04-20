@@ -59,10 +59,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="scripts.ghstars-ng")
     subparsers = parser.add_subparsers(dest="command", required=True)
 
-    sync_parser = subparsers.add_parser("sync")
-    sync_subparsers = sync_parser.add_subparsers(dest="sync_command", required=True)
-
-    sync_arxiv = sync_subparsers.add_parser("arxiv")
+    sync_arxiv = subparsers.add_parser("sync-arxiv")
     sync_arxiv.add_argument("--categories", default=None)
     sync_arxiv.add_argument("--max-results", type=int, default=None)
     sync_arxiv.add_argument("--from", dest="from_date", default=None)
@@ -70,7 +67,7 @@ def build_parser() -> argparse.ArgumentParser:
     sync_arxiv.add_argument("--day", default=None)
     sync_arxiv.add_argument("--month", default=None)
 
-    sync_links = sync_subparsers.add_parser("links")
+    sync_links = subparsers.add_parser("sync-links")
     sync_links.add_argument("--categories", default=None)
     sync_links.add_argument("--concurrency", type=int, default=None)
     sync_links.add_argument("--from", dest="from_date", default=None)
@@ -78,33 +75,27 @@ def build_parser() -> argparse.ArgumentParser:
     sync_links.add_argument("--day", default=None)
     sync_links.add_argument("--month", default=None)
 
-    audit_parser = subparsers.add_parser("audit")
-    audit_subparsers = audit_parser.add_subparsers(dest="audit_command", required=True)
-    audit_parity = audit_subparsers.add_parser("parity")
-    audit_parity.add_argument("--categories", default=None)
-    audit_parity.add_argument("--from", dest="from_date", default=None)
-    audit_parity.add_argument("--to", dest="to_date", default=None)
-    audit_parity.add_argument("--day", default=None)
-    audit_parity.add_argument("--month", default=None)
+    audit = subparsers.add_parser("audit")
+    audit.add_argument("--categories", default=None)
+    audit.add_argument("--from", dest="from_date", default=None)
+    audit.add_argument("--to", dest="to_date", default=None)
+    audit.add_argument("--day", default=None)
+    audit.add_argument("--month", default=None)
 
-    enrich_parser = subparsers.add_parser("enrich")
-    enrich_subparsers = enrich_parser.add_subparsers(dest="enrich_command", required=True)
-    enrich_repos = enrich_subparsers.add_parser("repos")
-    enrich_repos.add_argument("--categories", default=None)
-    enrich_repos.add_argument("--from", dest="from_date", default=None)
-    enrich_repos.add_argument("--to", dest="to_date", default=None)
-    enrich_repos.add_argument("--day", default=None)
-    enrich_repos.add_argument("--month", default=None)
+    enrich = subparsers.add_parser("enrich")
+    enrich.add_argument("--categories", default=None)
+    enrich.add_argument("--from", dest="from_date", default=None)
+    enrich.add_argument("--to", dest="to_date", default=None)
+    enrich.add_argument("--day", default=None)
+    enrich.add_argument("--month", default=None)
 
-    export_parser = subparsers.add_parser("export")
-    export_subparsers = export_parser.add_subparsers(dest="export_command", required=True)
-    export_csv = export_subparsers.add_parser("csv")
-    export_csv.add_argument("--categories", default=None)
-    export_csv.add_argument("--output", required=True)
-    export_csv.add_argument("--from", dest="from_date", default=None)
-    export_csv.add_argument("--to", dest="to_date", default=None)
-    export_csv.add_argument("--day", default=None)
-    export_csv.add_argument("--month", default=None)
+    export = subparsers.add_parser("export")
+    export.add_argument("--categories", default=None)
+    export.add_argument("--output", required=True)
+    export.add_argument("--from", dest="from_date", default=None)
+    export.add_argument("--to", dest="to_date", default=None)
+    export.add_argument("--day", default=None)
+    export.add_argument("--month", default=None)
 
     return parser
 
@@ -170,7 +161,7 @@ async def async_main(argv: list[str] | None = None) -> int:
             )
             github = GitHubClient(session, github_token=config.github_token, min_interval=config.github_min_interval)
 
-            if args.command == "sync" and args.sync_command == "arxiv":
+            if args.command == "sync-arxiv":
                 window = _resolve_arxiv_sync_window(
                     day=args.day,
                     month=args.month,
@@ -186,7 +177,7 @@ async def async_main(argv: list[str] | None = None) -> int:
                     window=window,
                 )
                 return 0
-            if args.command == "sync" and args.sync_command == "links":
+            if args.command == "sync-links":
                 concurrency = _resolve_sync_links_concurrency(args.concurrency, config.sync_links_concurrency)
                 window = _resolve_arxiv_sync_window(
                     day=args.day,
@@ -205,7 +196,7 @@ async def async_main(argv: list[str] | None = None) -> int:
                     window=window,
                 )
                 return 0
-            if args.command == "audit" and args.audit_command == "parity":
+            if args.command == "audit":
                 window = _resolve_arxiv_sync_window(
                     day=args.day,
                     month=args.month,
@@ -214,7 +205,7 @@ async def async_main(argv: list[str] | None = None) -> int:
                 )
                 _run_audit_parity(database, categories, window=window)
                 return 0
-            if args.command == "enrich" and args.enrich_command == "repos":
+            if args.command == "enrich":
                 window = _resolve_arxiv_sync_window(
                     day=args.day,
                     month=args.month,
@@ -223,7 +214,7 @@ async def async_main(argv: list[str] | None = None) -> int:
                 )
                 await _run_enrich_repos(database, github, categories, window=window)
                 return 0
-            if args.command == "export" and args.export_command == "csv":
+            if args.command == "export":
                 window = _resolve_arxiv_sync_window(
                     day=args.day,
                     month=args.month,

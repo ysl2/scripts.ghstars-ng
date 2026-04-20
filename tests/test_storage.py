@@ -2,7 +2,7 @@ import time
 
 import pytest
 
-from src.ghstars.models import Paper
+from src.ghstars.models import GitHubRepoMetadata, Paper
 from src.ghstars.storage.db import Database, LeaseLostError
 from src.ghstars.storage.raw_cache import RawCacheStore
 
@@ -148,6 +148,74 @@ def test_database_replaces_repo_observations_and_links(tmp_path):
         assert observations[0].normalized_repo_url == "https://github.com/foo/bar"
         assert len(links) == 1
         assert links[0].normalized_repo_url == "https://github.com/foo/bar"
+    finally:
+        db.close()
+
+
+def test_database_upserts_paper_link_sync_state(tmp_path):
+    db = Database(tmp_path / "ghstars.db")
+    try:
+        db.upsert_paper(
+            Paper(
+                arxiv_id="2603.12345",
+                abs_url="https://arxiv.org/abs/2603.12345",
+                title="Paper",
+                abstract="Abstract",
+                published_at=None,
+                updated_at=None,
+                authors=(),
+                categories=("cs.CV",),
+                comment=None,
+                primary_category="cs.CV",
+            )
+        )
+        db.upsert_paper_link_sync_state("2603.12345", "found", checked_at="2026-03-20T00:00:00+00:00")
+        state = db.get_paper_link_sync_state("2603.12345")
+        assert state is not None
+        assert state.status == "found"
+        assert state.checked_at == "2026-03-20T00:00:00+00:00"
+
+        db.upsert_paper_link_sync_state("2603.12345", "not_found", checked_at="2026-03-21T00:00:00+00:00")
+        state = db.get_paper_link_sync_state("2603.12345")
+        assert state is not None
+        assert state.status == "not_found"
+        assert state.checked_at == "2026-03-21T00:00:00+00:00"
+    finally:
+        db.close()
+
+
+def test_database_preserves_repo_created_at_while_refreshing_stars(tmp_path):
+    db = Database(tmp_path / "ghstars.db")
+    try:
+        db.upsert_github_repo(
+            GitHubRepoMetadata(
+                normalized_github_url="https://github.com/foo/bar",
+                owner="foo",
+                repo="bar",
+                stars=10,
+                created_at="2024-01-01T00:00:00Z",
+                description="first description",
+                checked_at="2026-03-20T00:00:00+00:00",
+            )
+        )
+        db.upsert_github_repo(
+            GitHubRepoMetadata(
+                normalized_github_url="https://github.com/foo/bar",
+                owner="foo",
+                repo="bar",
+                stars=25,
+                created_at="2025-02-02T00:00:00Z",
+                description="updated description",
+                checked_at="2026-03-21T00:00:00+00:00",
+            )
+        )
+
+        metadata = db.get_github_repo("https://github.com/foo/bar")
+        assert metadata is not None
+        assert metadata.stars == 25
+        assert metadata.created_at == "2024-01-01T00:00:00Z"
+        assert metadata.description == "updated description"
+        assert metadata.checked_at == "2026-03-21T00:00:00+00:00"
     finally:
         db.close()
 

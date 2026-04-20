@@ -65,9 +65,11 @@ async def request_text(
     rate_limiter: RateLimiter,
     retry_prefix: str,
     allowed_statuses: set[int] | None = None,
+    max_retries: int | None = None,
 ) -> tuple[int | None, str | None, dict[str, str], str | None]:
     allowed = allowed_statuses or set()
-    for attempt in range(MAX_RETRIES + 1):
+    retry_limit = MAX_RETRIES if max_retries is None else max(0, max_retries)
+    for attempt in range(retry_limit + 1):
         async with semaphore:
             await rate_limiter.acquire()
             try:
@@ -76,17 +78,17 @@ async def request_text(
                     body = await response.text()
                     if response.status == 200 or response.status in allowed:
                         return response.status, body, response_headers, None
-                    if response.status in {429, 500, 502, 503, 504} and attempt < MAX_RETRIES:
+                    if response.status in {429, 500, 502, 503, 504} and attempt < retry_limit:
                         await asyncio.sleep(_retry_delay_seconds(attempt, response_headers))
                         continue
                     return response.status, body, response_headers, f"{retry_prefix} error ({response.status})"
             except asyncio.TimeoutError:
-                if attempt < MAX_RETRIES:
+                if attempt < retry_limit:
                     await asyncio.sleep(0.5 * (2**attempt))
                     continue
                 return None, None, {}, f"{retry_prefix} timeout"
             except Exception as exc:
-                if attempt < MAX_RETRIES:
+                if attempt < retry_limit:
                     await asyncio.sleep(0.5 * (2**attempt))
                     continue
                 return None, None, {}, f"{retry_prefix} request failed: {exc}"

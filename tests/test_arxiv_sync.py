@@ -212,7 +212,7 @@ async def test_async_main_raises_for_incomplete_window_sync(monkeypatch, tmp_pat
     monkeypatch.setattr("src.ghstars.cli.ArxivMetadataClient", FakeClient)
 
     with pytest.raises(ArxivWindowSyncIncompleteError):
-        await async_main(["sync", "arxiv", "--month", "2026-04"])
+        await async_main(["sync-arxiv", "--month", "2026-04"])
 
 
 @pytest.mark.anyio

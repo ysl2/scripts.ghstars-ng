@@ -13,6 +13,7 @@ from src.ghstars.normalize.arxiv import build_arxiv_abs_url, extract_arxiv_id, s
 
 ARXIV_NS = {"a": "http://www.w3.org/2005/Atom"}
 ARXIV_MIN_INTERVAL = 3.0
+ARXIV_TRANSIENT_RETRY_LIMIT = 5
 
 
 class ArxivMetadataClient:
@@ -48,6 +49,39 @@ class ArxivMetadataClient:
             search_query=f"cat:{category}",
             start=start,
             max_results=max_results,
+        )
+
+    async def fetch_id_list_feed(self, arxiv_ids: list[str]) -> tuple[int | None, str | None, dict[str, str], str | None]:
+        id_list = ",".join(item.strip() for item in arxiv_ids if item and item.strip())
+        return await request_text(
+            self.session,
+            "https://export.arxiv.org/api/query",
+            params={"id_list": id_list},
+            semaphore=self.semaphore,
+            rate_limiter=self.rate_limiter,
+            retry_prefix="arXiv metadata id_list query",
+            max_retries=ARXIV_TRANSIENT_RETRY_LIMIT,
+        )
+
+    async def fetch_listing_page(
+        self,
+        *,
+        category: str,
+        period: str,
+        skip: int = 0,
+        show: int = 2000,
+    ) -> tuple[int | None, str | None, dict[str, str], str | None]:
+        return await request_text(
+            self.session,
+            f"https://arxiv.org/list/{category}/{period}",
+            params={
+                "skip": str(skip),
+                "show": str(show),
+            },
+            semaphore=self.semaphore,
+            rate_limiter=self.rate_limiter,
+            retry_prefix="arXiv listing query",
+            max_retries=ARXIV_TRANSIENT_RETRY_LIMIT,
         )
 
     async def fetch_paper_feed(self, arxiv_id: str) -> tuple[int | None, str | None, dict[str, str], str | None]:

@@ -1,196 +1,204 @@
-# scripts.ghstars-ng
+# ghstars
 
-Local-first toolkit for building and auditing deterministic arXiv ↔ GitHub associations.
+`ghstars` is a shared workspace service for:
 
-## What it does
+1. syncing a batch of arXiv papers into PostgreSQL
+2. finding exact GitHub repos for those papers
+3. enriching linked repos with GitHub metadata
+4. exporting scoped CSV snapshots
 
-`scripts.ghstars-ng` builds a local SQLite dataset from arXiv papers and conservative GitHub link evidence.
-It is designed for workflows where you want reproducible, inspectable paper → repo associations instead of fuzzy search results.
+This V2 path is intentionally simple:
 
-The pipeline is centered on a local database:
+- one shared workspace
+- one PostgreSQL database
+- one FastAPI app
+- one background worker
+- one WebUI
+- one flat CLI
 
-1. sync arXiv papers into SQLite
-2. collect provider-specific GitHub link observations
-3. resolve final paper-repo links conservatively
-4. enrich linked repositories with GitHub metadata
-5. audit parity and export timestamped CSV snapshots
+No user system is required for the current version. Visitors operate on the same queue and the same dataset.
 
-## Key properties
+## Main ideas
 
-- local-first: all canonical state lives in SQLite
-- deterministic exact-match association chain
-- conservative resolver: conflicting exact sources stay ambiguous instead of forcing a winner
-- multi-process-safe local execution on a single machine
-- raw response caching for replay and debugging
-- timestamped CSV exports with `published_at`
+### Database first
 
-## Exact-match sources
+Papers, current repo observations, stable link state, repo metadata, jobs, raw fetch records, and exports all live in PostgreSQL.
 
-The live main CLI chain is:
+### Cheap where possible, conservative where necessary
 
-- arXiv comment
-- arXiv abstract HTML
-- Hugging Face paper API by arXiv id
-- Hugging Face paper HTML by arXiv id
-- AlphaXiv paper API by arXiv id
-- AlphaXiv paper HTML by arXiv id
+`sync-links` only re-checks papers when the repo state is:
 
-`uv run main.py sync links` intentionally follows only this paper-scoped exact-match chain.
-It does not use title-search fallback against Hugging Face or GitHub.
+- `unknown`
+- missing entirely
+- past its `refresh_after` TTL
+- forced explicitly
 
-## Non-goals
+If a paper is deterministically `found` or `not_found`, it waits 7 days before the next full repo lookup.
 
-This project is intentionally conservative.
+If a lookup is incomplete because of network/provider failure and no trustworthy repo was found, the paper stays `unknown` or keeps its previous stable result. Incomplete fetches do not stamp a trusted `not_found`.
 
-It does **not** try to be:
+### Metadata refresh policy
 
-- a multi-machine distributed system
-- a fuzzy repo discovery engine
-- a GitHub title-search matcher
-- a best-effort heuristic linker that guesses when evidence is weak
+`enrich` treats GitHub fields in two groups:
 
-If an exact source does not provide a trustworthy repo signal, the project prefers `not_found` or `ambiguous` over a risky match.
+- dynamic: `stars`, `description`, `homepage`, `topics`, `license`, `archived`, `pushed_at`
+- stable: `github_id`, `created_at`
 
-## Install
+Dynamic fields refresh every enrich run. Stable fields are only initialized once or filled when still missing.
+
+## Architecture
+
+Current V2 runtime:
+
+- `main.py`: flat CLI entry
+- `src/ghstarsv2/app.py`: FastAPI app
+- `src/ghstarsv2/jobs.py`: shared job queue + worker claiming
+- `src/ghstarsv2/services.py`: sync/enrich/export pipeline logic
+- `frontend/`: React WebUI
+
+The older `src/ghstars/` package is still kept for parser/provider reuse, but it is no longer the main runtime path.
+
+## Queue semantics
+
+The current queue is intentionally serial.
+
+- the default Compose topology starts exactly one `worker`
+- that worker claims exactly one pending job at a time
+- later jobs wait in FIFO order instead of running in parallel
+
+This is deliberate for now:
+
+- `sync-arxiv` and `sync-links` both consume arXiv capacity
+- rate limiting is process-local, not globally coordinated
+- later steps currently snapshot the database at start, so same-scope cross-step parallelism can miss newly inserted papers or repos
+
+If throughput needs to increase later, that should be done with a dedicated scheduler redesign instead of simply adding more workers.
+
+## Quick start
+
+### 1. Docker Compose workflow
+
+This is the main runtime path.
+
+```bash
+cp .env.example .env
+docker compose up --build
+```
+
+This starts:
+
+- `db`: PostgreSQL
+- `app`: FastAPI + built frontend
+- `worker`: background job worker
+
+Compose runtime data is stored in a Docker named volume.
+This avoids macOS bind-mount issues and keeps V2 isolated from any older local `./data/` directory or legacy SQLite artifacts.
+
+Open:
+
+```text
+http://127.0.0.1:8000
+```
+
+Run CLI commands against the same shared workspace:
+
+```bash
+docker compose exec app uv run python main.py jobs
+docker compose exec app uv run python main.py sync-arxiv --categories cs.CV --month 2026-04
+docker compose exec app uv run python main.py sync-links --categories cs.CV --month 2026-04
+docker compose exec app uv run python main.py enrich --categories cs.CV --month 2026-04
+docker compose exec app uv run python main.py export --categories cs.CV --month 2026-04 --output cv-2026-04.csv
+```
+
+### 2. Local Python workflow
+
+This is optional and assumes you already have a PostgreSQL instance reachable from the host.
 
 ```bash
 uv sync
 cp .env.example .env
 ```
 
-Then adjust `.env` if needed.
-
-## Configuration
-
-Example `.env`:
+Before starting the app, update `DATABASE_URL` in `.env` so it points to your host-accessible PostgreSQL, for example:
 
 ```dotenv
+DATABASE_URL=postgresql+psycopg://ghstars:ghstars@127.0.0.1:5432/ghstars
+```
+
+Then start the API:
+
+```bash
+uv run python main.py serve
+```
+
+Start the worker in another terminal:
+
+```bash
+uv run python main.py worker
+```
+
+Open:
+
+```text
+http://127.0.0.1:8000
+```
+
+## CLI
+
+The CLI is flat by design:
+
+```bash
+uv run python main.py serve
+uv run python main.py worker
+uv run python main.py sync-arxiv --categories cs.CV --month 2026-04
+uv run python main.py sync-links --categories cs.CV --month 2026-04
+uv run python main.py enrich --categories cs.CV --month 2026-04
+uv run python main.py export --categories cs.CV --month 2026-04 --output cv-2026-04.csv
+uv run python main.py jobs
+uv run python main.py papers --categories cs.CV --month 2026-04
+uv run python main.py repos
+uv run python main.py exports
+```
+
+CLI command names stay hyphenated for user-facing consistency. Internal job type ids stay underscore-based.
+
+## WebUI
+
+The WebUI is a single shared control plane:
+
+- set scope
+- queue `sync-arxiv`
+- queue `sync-links`
+- queue `enrich`
+- queue `export`
+- inspect recent jobs
+- inspect scoped papers
+- inspect enriched repos
+- download exports
+
+## Environment
+
+Compose-oriented `.env` example:
+
+```dotenv
+DATABASE_URL=postgresql+psycopg://ghstars:ghstars@db:5432/ghstars
+DATA_DIR=data
+
 DEFAULT_CATEGORIES=cs.CV
+
 GITHUB_TOKEN=
 HUGGINGFACE_TOKEN=
 ALPHAXIV_TOKEN=
+
+HUGGINGFACE_ENABLED=true
+ALPHAXIV_ENABLED=true
+
 ARXIV_API_MIN_INTERVAL=0.5
 HUGGINGFACE_MIN_INTERVAL=0.5
 GITHUB_MIN_INTERVAL=0.5
-```
 
-Notes:
-
-- `DEFAULT_CATEGORIES` is used when `--categories` is omitted
-- tokens are optional, but authenticated access is better for real runs
-- the project defaults to local storage under `data/`
-
-## Quick start
-
-### 1. Sync papers from arXiv
-
-```bash
-uv run main.py sync arxiv --categories cs.CV --month 2026-01
-```
-
-### 2. Sync deterministic GitHub link evidence
-
-```bash
-uv run main.py sync links --categories cs.CV --month 2026-01
-```
-
-### 3. Enrich resolved repositories with GitHub metadata
-
-```bash
-uv run main.py enrich repos --categories cs.CV --month 2026-01
-```
-
-### 4. Audit provider-visible vs final links
-
-```bash
-uv run main.py audit parity --categories cs.CV --month 2026-01
-```
-
-### 5. Export a timestamped CSV snapshot
-
-```bash
-uv run main.py export csv --categories cs.CV --month 2026-01 --output output/papers.csv
-```
-
-The export command writes to a timestamped file such as:
-
-```text
-output/papers-20260416-071922-151537.csv
-```
-
-`--output` supplies the base path/name; the actual file written is a timestamped sibling file.
-The CSV includes every paper in the selected category/time window, including papers with no resolved GitHub link.
-
-## Example real run
-
-A full real run on `2026-01` for the default `cs.CV` category produced:
-
-- papers: `2444`
-- provider-visible link papers: `872`
-- final found papers: `872`
-- ambiguous papers: `0`
-- end-to-end runtime: about `41m 17s`
-
-Treat this as a snapshot of current behavior, not a benchmark guarantee.
-
-## Time window filters
-
-Supported filters:
-
-- `--day YYYY-MM-DD`
-- `--month YYYY-MM`
-- `--from YYYY-MM-DD --to YYYY-MM-DD`
-
-These filters are supported across the downstream workflow, including:
-
-- `sync arxiv`
-- `sync links`
-- `enrich repos`
-- `audit parity`
-- `export csv`
-
-## Storage layout
-
-- SQLite database: `data/ghstars.db`
-- raw response cache: `data/raw/`
-- exported CSV snapshots: user-specified output directory
-
-## CSV columns
-
-The CSV export currently includes:
-
-- `arxiv_id`
-- `abs_url`
-- `title`
-- `abstract`
-- `published_at`
-- `categories`
-- `primary_category`
-- `github_primary`
-- `github_all`
-- `link_status`
-- `stars`
-- `created_at`
-- `description`
-
-Exports include every paper in the selected category/time window.
-For papers without a final resolved repository, `github_primary=""`, `github_all=""`, and `link_status="not_found"`.
-For resolved rows, `github_primary` is the primary final repository URL, `github_all` is a semicolon-separated list of final repository URLs, and `link_status` is `found` or `ambiguous`.
-
-## Command overview
-
-```bash
-uv run main.py sync arxiv --categories cs.CV
-uv run main.py sync links --categories cs.CV
-uv run main.py audit parity --categories cs.CV
-uv run main.py enrich repos --categories cs.CV
-uv run main.py export csv --categories cs.CV --output output/papers.csv
-```
-
-To inspect all CLI options:
-
-```bash
-uv run main.py --help
+WORKER_POLL_SECONDS=1.0
+JOB_TIMEOUT_SECONDS=1800
 ```
 
 ## Testing
@@ -199,35 +207,3 @@ uv run main.py --help
 uv sync --dev
 uv run pytest
 ```
-
-## Design principles
-
-### Database-first
-
-Canonical paper facts, source evidence, final links, sync state, leases, and enriched repo metadata are all stored locally.
-The database is the center of the workflow, not an afterthought.
-
-### Conservative resolution
-
-Provider observations are stored first. Final links are derived afterward.
-This keeps source evidence inspectable and makes downstream exports reproducible.
-
-### Multi-process local safety
-
-The project is designed for single-machine use with possible overlapping processes.
-Shared writes are fenced with SQLite transactions and lease-based coordination.
-
-### Partial work is preserved where it matters
-
-For expensive upstream fetches such as arXiv window sync, already fetched pages are persisted even if the overall run later fails.
-
-## Current fit
-
-`scripts.ghstars-ng` is a good fit for:
-
-- local dataset building
-- repeatable monthly or daily paper sync
-- auditing exact-source parity
-- exporting paper/repo snapshots for later analysis
-
-It is not trying to be a hosted service or a broad fuzzy-discovery platform.

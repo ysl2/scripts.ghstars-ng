@@ -3,7 +3,10 @@ __pycache__/
 .venv/
 .env
 data/
+runtime-data/
 output/
+frontend/node_modules/
+frontend/dist/
 *.pyc
 .DS_Store
 .worktrees

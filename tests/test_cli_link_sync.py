@@ -113,6 +113,16 @@ def _seed_surface_observation(
     )
 
 
+def _seed_link_sync_state(
+    db: Database,
+    *,
+    arxiv_id: str = "2603.12345",
+    status: str,
+    checked_at: str,
+) -> None:
+    db.upsert_paper_link_sync_state(arxiv_id, status, checked_at=checked_at)
+
+
 @pytest.mark.anyio
 async def test_run_sync_links_stops_after_huggingface_api_hit(tmp_path):
     db = Database(tmp_path / "ghstars.db")
@@ -285,7 +295,7 @@ async def test_run_sync_links_uses_alphaxiv_api_when_huggingface_misses(tmp_path
 
 
 @pytest.mark.anyio
-async def test_run_sync_links_reuses_cached_arxiv_abs_html_without_network(tmp_path):
+async def test_run_sync_links_always_refreshes_arxiv_abs_html(tmp_path):
     db = Database(tmp_path / "ghstars.db")
     raw_cache = RawCacheStore(tmp_path / "raw")
     try:
@@ -298,298 +308,16 @@ async def test_run_sync_links_reuses_cached_arxiv_abs_html_without_network(tmp_p
             request_key="abs:2603.12345",
             request_url="https://arxiv.org/abs/2603.12345",
             status_code=200,
-            body='<a href="https://github.com/foo/bar">code</a>',
+            body='<a href="https://github.com/foo/old">old</a>',
             content_type="text/html",
             status="found",
-            normalized_repo_url="https://github.com/foo/bar",
+            normalized_repo_url="https://github.com/foo/old",
         )
+        calls: list[str] = []
 
         class FakeArxivClient:
             async def fetch_abs_html(self, arxiv_id):
-                raise AssertionError("arXiv abs HTML should reuse cache")
-
-        class FakeHuggingFaceClient:
-            async def fetch_paper_payload(self, arxiv_id):
-                raise AssertionError("HF should not run after cached arXiv hit")
-
-            async def fetch_paper_html(self, arxiv_id):
-                raise AssertionError("HF HTML should not run after cached arXiv hit")
-
-        class FakeAlphaXivClient:
-            async def fetch_paper_html(self, arxiv_id):
-                raise AssertionError("AlphaXiv should not run after cached arXiv hit")
-
-        await _run_sync_links(
-            db,
-            raw_cache,
-            FakeArxivClient(),
-            FakeHuggingFaceClient(),
-            FakeAlphaXivClient(),
-            ("cs.CV",),
-        )
-
-        links = db.list_paper_repo_links("2603.12345")
-        assert [link.normalized_repo_url for link in links] == ["https://github.com/foo/bar"]
-    finally:
-        db.close()
-
-
-@pytest.mark.anyio
-async def test_run_sync_links_reuses_cached_huggingface_api_without_network(tmp_path):
-    db = Database(tmp_path / "ghstars.db")
-    raw_cache = RawCacheStore(tmp_path / "raw")
-    try:
-        _insert_paper(db)
-        _seed_surface_observation(
-            db,
-            raw_cache,
-            provider="arxiv",
-            surface="abs_html",
-            request_key="abs:2603.12345",
-            request_url="https://arxiv.org/abs/2603.12345",
-            status_code=404,
-            body="",
-            content_type="text/html",
-            status="checked_no_match",
-        )
-        _seed_surface_observation(
-            db,
-            raw_cache,
-            provider="huggingface",
-            surface="paper_api",
-            request_key="paper_api:2603.12345",
-            request_url="https://huggingface.co/api/papers/2603.12345",
-            status_code=200,
-            body='{"githubRepo":"https://github.com/foo/bar"}',
-            content_type="application/json",
-            status="found",
-            normalized_repo_url="https://github.com/foo/bar",
-        )
-
-        class FakeArxivClient:
-            async def fetch_abs_html(self, arxiv_id):
-                raise AssertionError("arXiv abs HTML should reuse cached no-match")
-
-        class FakeHuggingFaceClient:
-            async def fetch_paper_payload(self, arxiv_id):
-                raise AssertionError("HF API should reuse cache")
-
-            async def fetch_paper_html(self, arxiv_id):
-                raise AssertionError("HF HTML should not run after cached HF API hit")
-
-        class FakeAlphaXivClient:
-            async def fetch_paper_payload(self, arxiv_id):
-                raise AssertionError("AlphaXiv API should not run after cached HF API hit")
-
-            async def fetch_paper_html(self, arxiv_id):
-                raise AssertionError("AlphaXiv should not run after cached HF API hit")
-
-        await _run_sync_links(
-            db,
-            raw_cache,
-            FakeArxivClient(),
-            FakeHuggingFaceClient(),
-            FakeAlphaXivClient(),
-            ("cs.CV",),
-        )
-
-        links = db.list_paper_repo_links("2603.12345")
-        assert [link.normalized_repo_url for link in links] == ["https://github.com/foo/bar"]
-    finally:
-        db.close()
-
-
-@pytest.mark.anyio
-async def test_run_sync_links_reuses_cached_alphaxiv_api_without_network(tmp_path):
-    db = Database(tmp_path / "ghstars.db")
-    raw_cache = RawCacheStore(tmp_path / "raw")
-    try:
-        _insert_paper(db)
-        _seed_surface_observation(
-            db,
-            raw_cache,
-            provider="arxiv",
-            surface="abs_html",
-            request_key="abs:2603.12345",
-            request_url="https://arxiv.org/abs/2603.12345",
-            status_code=404,
-            body="",
-            content_type="text/html",
-            status="checked_no_match",
-        )
-        _seed_surface_observation(
-            db,
-            raw_cache,
-            provider="huggingface",
-            surface="paper_api",
-            request_key="paper_api:2603.12345",
-            request_url="https://huggingface.co/api/papers/2603.12345",
-            status_code=404,
-            body="{}",
-            content_type="application/json",
-            status="checked_no_match",
-        )
-        _seed_surface_observation(
-            db,
-            raw_cache,
-            provider="alphaxiv",
-            surface="paper_api",
-            request_key="paper_api:2603.12345",
-            request_url="https://api.alphaxiv.org/papers/v3/2603.12345",
-            status_code=200,
-            body='{"paper":{"implementation":"https://github.com/foo/bar"}}',
-            content_type="application/json",
-            status="found",
-            normalized_repo_url="https://github.com/foo/bar",
-        )
-
-        class FakeArxivClient:
-            async def fetch_abs_html(self, arxiv_id):
-                raise AssertionError("arXiv abs HTML should reuse cached no-match")
-
-        class FakeHuggingFaceClient:
-            async def fetch_paper_payload(self, arxiv_id):
-                raise AssertionError("HF API should reuse cached no-match")
-
-            async def fetch_paper_html(self, arxiv_id):
-                raise AssertionError("HF HTML should not run after cached API 404")
-
-        class FakeAlphaXivClient:
-            async def fetch_paper_payload(self, arxiv_id):
-                raise AssertionError("AlphaXiv API should reuse cache")
-
-            async def fetch_paper_html(self, arxiv_id):
-                raise AssertionError("AlphaXiv HTML should not run after cached API hit")
-
-        await _run_sync_links(
-            db,
-            raw_cache,
-            FakeArxivClient(),
-            FakeHuggingFaceClient(),
-            FakeAlphaXivClient(),
-            ("cs.CV",),
-        )
-
-        links = db.list_paper_repo_links("2603.12345")
-        assert [link.normalized_repo_url for link in links] == ["https://github.com/foo/bar"]
-    finally:
-        db.close()
-
-
-@pytest.mark.anyio
-async def test_run_sync_links_skips_repeated_fetch_after_checked_no_match(tmp_path):
-    db = Database(tmp_path / "ghstars.db")
-    raw_cache = RawCacheStore(tmp_path / "raw")
-    try:
-        _insert_paper(db)
-        _seed_surface_observation(
-            db,
-            raw_cache,
-            provider="arxiv",
-            surface="abs_html",
-            request_key="abs:2603.12345",
-            request_url="https://arxiv.org/abs/2603.12345",
-            status_code=404,
-            body="",
-            content_type="text/html",
-            status="checked_no_match",
-            observed_at="2099-04-15T00:00:00+00:00",
-        )
-        _seed_surface_observation(
-            db,
-            raw_cache,
-            provider="huggingface",
-            surface="paper_api",
-            request_key="paper_api:2603.12345",
-            request_url="https://huggingface.co/api/papers/2603.12345",
-            status_code=404,
-            body="{}",
-            content_type="application/json",
-            status="checked_no_match",
-            observed_at="2099-04-15T00:00:00+00:00",
-        )
-        _seed_surface_observation(
-            db,
-            raw_cache,
-            provider="alphaxiv",
-            surface="paper_api",
-            request_key="paper_api:2603.12345",
-            request_url="https://api.alphaxiv.org/papers/v3/2603.12345",
-            status_code=404,
-            body="{}",
-            content_type="application/json",
-            status="checked_no_match",
-            observed_at="2099-04-15T00:00:00+00:00",
-        )
-        _seed_surface_observation(
-            db,
-            raw_cache,
-            provider="alphaxiv",
-            surface="paper_html",
-            request_key="paper_html:2603.12345",
-            request_url="https://www.alphaxiv.org/abs/2603.12345",
-            status_code=404,
-            body="",
-            content_type="text/html",
-            status="checked_no_match",
-            observed_at="2099-04-15T00:00:00+00:00",
-        )
-
-        class FakeArxivClient:
-            async def fetch_abs_html(self, arxiv_id):
-                raise AssertionError("arXiv abs HTML should reuse cached no-match")
-
-        class FakeHuggingFaceClient:
-            async def fetch_paper_payload(self, arxiv_id):
-                raise AssertionError("HF API should reuse cached no-match")
-
-            async def fetch_paper_html(self, arxiv_id):
-                raise AssertionError("HF HTML should not run after cached API 404")
-
-        class FakeAlphaXivClient:
-            async def fetch_paper_payload(self, arxiv_id):
-                raise AssertionError("AlphaXiv API should reuse cached no-match")
-
-            async def fetch_paper_html(self, arxiv_id):
-                raise AssertionError("AlphaXiv should reuse cached no-match")
-
-        await _run_sync_links(
-            db,
-            raw_cache,
-            FakeArxivClient(),
-            FakeHuggingFaceClient(),
-            FakeAlphaXivClient(),
-            ("cs.CV",),
-        )
-
-        assert db.list_paper_repo_links("2603.12345") == []
-    finally:
-        db.close()
-
-
-@pytest.mark.anyio
-async def test_run_sync_links_refetches_after_checked_no_match_ttl_expires(tmp_path):
-    db = Database(tmp_path / "ghstars.db")
-    raw_cache = RawCacheStore(tmp_path / "raw")
-    try:
-        _insert_paper(db)
-        _seed_surface_observation(
-            db,
-            raw_cache,
-            provider="arxiv",
-            surface="abs_html",
-            request_key="abs:2603.12345",
-            request_url="https://arxiv.org/abs/2603.12345",
-            status_code=404,
-            body="",
-            content_type="text/html",
-            status="checked_no_match",
-            observed_at="2000-01-01T00:00:00+00:00",
-        )
-
-        class FakeArxivClient:
-            async def fetch_abs_html(self, arxiv_id):
-                assert arxiv_id == "2603.12345"
+                calls.append(arxiv_id)
                 return 200, '<a href="https://github.com/foo/bar">code</a>', {"Content-Type": "text/html"}, None
 
         class FakeHuggingFaceClient:
@@ -615,8 +343,252 @@ async def test_run_sync_links_refetches_after_checked_no_match_ttl_expires(tmp_p
             ("cs.CV",),
         )
 
+        assert calls == ["2603.12345"]
         links = db.list_paper_repo_links("2603.12345")
         assert [link.normalized_repo_url for link in links] == ["https://github.com/foo/bar"]
+    finally:
+        db.close()
+
+
+@pytest.mark.anyio
+async def test_run_sync_links_skips_fallback_refresh_within_fresh_found_ttl(tmp_path):
+    db = Database(tmp_path / "ghstars.db")
+    raw_cache = RawCacheStore(tmp_path / "raw")
+    try:
+        _insert_paper(db)
+        _seed_surface_observation(
+            db,
+            raw_cache,
+            provider="arxiv",
+            surface="abs_html",
+            request_key="abs:2603.12345",
+            request_url="https://arxiv.org/abs/2603.12345",
+            status_code=404,
+            body="",
+            content_type="text/html",
+            status="checked_no_match",
+        )
+        _seed_link_sync_state(db, status="found", checked_at="2099-04-15T00:00:00+00:00")
+        _seed_surface_observation(
+            db,
+            raw_cache,
+            provider="huggingface",
+            surface="paper_api",
+            request_key="paper_api:2603.12345",
+            request_url="https://huggingface.co/api/papers/2603.12345",
+            status_code=200,
+            body='{"githubRepo":"https://github.com/foo/bar"}',
+            content_type="application/json",
+            status="found",
+            normalized_repo_url="https://github.com/foo/bar",
+        )
+        _seed_final_link(db, arxiv_id="2603.12345", repo_url="https://github.com/foo/bar")
+
+        class FakeArxivClient:
+            async def fetch_abs_html(self, arxiv_id):
+                assert arxiv_id == "2603.12345"
+                return 404, "", {"Content-Type": "text/html"}, None
+
+        class FakeHuggingFaceClient:
+            async def fetch_paper_payload(self, arxiv_id):
+                raise AssertionError("HF API should be skipped while link TTL is fresh")
+
+            async def fetch_paper_html(self, arxiv_id):
+                raise AssertionError("HF HTML should be skipped while link TTL is fresh")
+
+        class FakeAlphaXivClient:
+            async def fetch_paper_payload(self, arxiv_id):
+                raise AssertionError("AlphaXiv API should be skipped while link TTL is fresh")
+
+            async def fetch_paper_html(self, arxiv_id):
+                raise AssertionError("AlphaXiv should be skipped while link TTL is fresh")
+
+        await _run_sync_links(
+            db,
+            raw_cache,
+            FakeArxivClient(),
+            FakeHuggingFaceClient(),
+            FakeAlphaXivClient(),
+            ("cs.CV",),
+        )
+
+        links = db.list_paper_repo_links("2603.12345")
+        assert [link.normalized_repo_url for link in links] == ["https://github.com/foo/bar"]
+    finally:
+        db.close()
+
+
+@pytest.mark.anyio
+async def test_run_sync_links_skips_fallback_refresh_within_fresh_not_found_ttl(tmp_path):
+    db = Database(tmp_path / "ghstars.db")
+    raw_cache = RawCacheStore(tmp_path / "raw")
+    try:
+        _insert_paper(db)
+        _seed_link_sync_state(db, status="not_found", checked_at="2099-04-15T00:00:00+00:00")
+        _seed_surface_observation(
+            db,
+            raw_cache,
+            provider="arxiv",
+            surface="abs_html",
+            request_key="abs:2603.12345",
+            request_url="https://arxiv.org/abs/2603.12345",
+            status_code=404,
+            body="",
+            content_type="text/html",
+            status="checked_no_match",
+        )
+        class FakeArxivClient:
+            async def fetch_abs_html(self, arxiv_id):
+                assert arxiv_id == "2603.12345"
+                return 404, "", {"Content-Type": "text/html"}, None
+
+        class FakeHuggingFaceClient:
+            async def fetch_paper_payload(self, arxiv_id):
+                raise AssertionError("HF API should be skipped while no-match TTL is fresh")
+
+            async def fetch_paper_html(self, arxiv_id):
+                raise AssertionError("HF HTML should be skipped while no-match TTL is fresh")
+
+        class FakeAlphaXivClient:
+            async def fetch_paper_payload(self, arxiv_id):
+                raise AssertionError("AlphaXiv API should be skipped while no-match TTL is fresh")
+
+            async def fetch_paper_html(self, arxiv_id):
+                raise AssertionError("AlphaXiv HTML should be skipped while no-match TTL is fresh")
+
+        await _run_sync_links(
+            db,
+            raw_cache,
+            FakeArxivClient(),
+            FakeHuggingFaceClient(),
+            FakeAlphaXivClient(),
+            ("cs.CV",),
+        )
+
+        assert db.list_paper_repo_links("2603.12345") == []
+    finally:
+        db.close()
+
+
+@pytest.mark.anyio
+async def test_run_sync_links_refetches_fallback_after_ttl_expires(tmp_path):
+    db = Database(tmp_path / "ghstars.db")
+    raw_cache = RawCacheStore(tmp_path / "raw")
+    try:
+        _insert_paper(db)
+        _seed_link_sync_state(db, status="not_found", checked_at="2000-01-01T00:00:00+00:00")
+        _seed_surface_observation(
+            db,
+            raw_cache,
+            provider="arxiv",
+            surface="abs_html",
+            request_key="abs:2603.12345",
+            request_url="https://arxiv.org/abs/2603.12345",
+            status_code=404,
+            body="",
+            content_type="text/html",
+            status="checked_no_match",
+            observed_at="2000-01-01T00:00:00+00:00",
+        )
+
+        class FakeArxivClient:
+            async def fetch_abs_html(self, arxiv_id):
+                assert arxiv_id == "2603.12345"
+                return 404, "", {"Content-Type": "text/html"}, None
+
+        class FakeHuggingFaceClient:
+            async def fetch_paper_payload(self, arxiv_id):
+                assert arxiv_id == "2603.12345"
+                return 200, '{"githubRepo":"https://github.com/foo/bar"}', {"Content-Type": "application/json"}, None
+
+            async def fetch_paper_html(self, arxiv_id):
+                raise AssertionError("HF HTML should not run after successful HF API refresh")
+
+        class FakeAlphaXivClient:
+            async def fetch_paper_payload(self, arxiv_id):
+                raise AssertionError("AlphaXiv API should not run after successful HF API refresh")
+
+            async def fetch_paper_html(self, arxiv_id):
+                raise AssertionError("AlphaXiv should not run after successful HF API refresh")
+
+        await _run_sync_links(
+            db,
+            raw_cache,
+            FakeArxivClient(),
+            FakeHuggingFaceClient(),
+            FakeAlphaXivClient(),
+            ("cs.CV",),
+        )
+
+        links = db.list_paper_repo_links("2603.12345")
+        assert [link.normalized_repo_url for link in links] == ["https://github.com/foo/bar"]
+        state = db.get_paper_link_sync_state("2603.12345")
+        assert state is not None
+        assert state.status == "found"
+    finally:
+        db.close()
+
+
+@pytest.mark.anyio
+async def test_run_sync_links_keeps_previous_links_after_partial_refresh_failure(tmp_path):
+    db = Database(tmp_path / "ghstars.db")
+    raw_cache = RawCacheStore(tmp_path / "raw")
+    try:
+        _insert_paper(db)
+        _seed_link_sync_state(db, status="found", checked_at="2000-01-01T00:00:00+00:00")
+        _seed_final_link(db, arxiv_id="2603.12345", repo_url="https://github.com/foo/old")
+        _seed_surface_observation(
+            db,
+            raw_cache,
+            provider="huggingface",
+            surface="paper_api",
+            request_key="paper_api:2603.12345",
+            request_url="https://huggingface.co/api/papers/2603.12345",
+            status_code=200,
+            body='{"githubRepo":"https://github.com/foo/old"}',
+            content_type="application/json",
+            status="found",
+            normalized_repo_url="https://github.com/foo/old",
+        )
+
+        class FakeArxivClient:
+            async def fetch_abs_html(self, arxiv_id):
+                assert arxiv_id == "2603.12345"
+                return 404, "", {"Content-Type": "text/html"}, None
+
+        class FakeHuggingFaceClient:
+            async def fetch_paper_payload(self, arxiv_id):
+                assert arxiv_id == "2603.12345"
+                return 503, None, {}, "HF API error"
+
+            async def fetch_paper_html(self, arxiv_id):
+                assert arxiv_id == "2603.12345"
+                return 404, "", {"Content-Type": "text/html"}, None
+
+        class FakeAlphaXivClient:
+            async def fetch_paper_payload(self, arxiv_id):
+                assert arxiv_id == "2603.12345"
+                return 404, "{}", {"Content-Type": "application/json"}, None
+
+            async def fetch_paper_html(self, arxiv_id):
+                assert arxiv_id == "2603.12345"
+                return 404, "", {"Content-Type": "text/html"}, None
+
+        await _run_sync_links(
+            db,
+            raw_cache,
+            FakeArxivClient(),
+            FakeHuggingFaceClient(),
+            FakeAlphaXivClient(),
+            ("cs.CV",),
+        )
+
+        links = db.list_paper_repo_links("2603.12345")
+        assert [link.normalized_repo_url for link in links] == ["https://github.com/foo/old"]
+        state = db.get_paper_link_sync_state("2603.12345")
+        assert state is not None
+        assert state.status == "found"
+        assert state.checked_at == "2000-01-01T00:00:00+00:00"
     finally:
         db.close()
 

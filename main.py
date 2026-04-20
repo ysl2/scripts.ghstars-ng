@@ -1,4 +1,4 @@
-from src.ghstars.cli import main
+from src.ghstarsv2.cli import main
 
 
 if __name__ == "__main__":

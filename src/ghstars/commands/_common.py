@@ -1,8 +1,6 @@
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Callable
-from datetime import datetime, timedelta, timezone
 import os
 import uuid
 
@@ -13,7 +11,6 @@ from src.ghstars.storage.raw_cache import RawCacheStore
 
 
 EXTRACTOR_VERSION = "2"
-EXACT_NO_MATCH_TTL = timedelta(days=7)
 
 
 def _list_papers_for_window(
@@ -27,58 +24,6 @@ def _list_papers_for_window(
         published_from=window.start_date.isoformat() if window.start_date is not None else None,
         published_to=window.end_date.isoformat() if window.end_date is not None else None,
     )
-
-
-def _try_reuse_exact_surface(
-    database: Database,
-    raw_cache: RawCacheStore,
-    *,
-    arxiv_id: str,
-    provider: str,
-    surface: str,
-    extract_urls: Callable[[str | None], tuple[str, ...]],
-    lease: PaperSyncLease | None = None,
-) -> tuple[bool, bool, int | None]:
-    observations = database.list_surface_repo_observations(arxiv_id, provider, surface)
-    if not observations:
-        return False, False, None
-    latest = observations[-1]
-    if latest.status == "fetch_failed":
-        return False, False, None
-    if latest.status == "checked_no_match" and _is_exact_no_match_expired(latest.observed_at):
-        return False, False, None
-    raw_cache_id = next((item.raw_cache_id for item in observations if item.raw_cache_id is not None), None)
-    if raw_cache_id is None:
-        return latest.status == "checked_no_match", False, None
-    entry = database.get_raw_cache_by_id(raw_cache_id)
-    if entry is None:
-        return latest.status == "checked_no_match", False, None
-    body = raw_cache.read_body(entry)
-    if body is None:
-        return latest.status == "checked_no_match", False, entry.status_code
-    urls = extract_urls(body)
-    _replace_surface_observations(
-        database,
-        arxiv_id=arxiv_id,
-        provider=provider,
-        surface=surface,
-        urls=urls,
-        evidence_text=body,
-        raw_cache_id=entry.id,
-        lease=lease,
-    )
-    return True, bool(urls), entry.status_code
-
-
-def _is_exact_no_match_expired(observed_at: str) -> bool:
-    try:
-        observed = datetime.fromisoformat(observed_at)
-    except ValueError:
-        return True
-    if observed.tzinfo is None:
-        observed = observed.replace(tzinfo=timezone.utc)
-    return datetime.now(timezone.utc) - observed >= EXACT_NO_MATCH_TTL
-
 
 def _persist_raw_response(
     database: Database,
