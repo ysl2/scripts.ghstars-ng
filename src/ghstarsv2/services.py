@@ -282,7 +282,7 @@ def get_dashboard_stats(db: Session, scope_json: dict[str, Any]) -> dict[str, An
         "found": 0,
         "not_found": 0,
         "ambiguous": 0,
-        "unknown": paper_count,
+        "unknown": 0,
     }
     status_rows = db.execute(
         select(
@@ -294,11 +294,18 @@ def get_dashboard_stats(db: Session, scope_json: dict[str, Any]) -> dict[str, An
         .where(*_paper_scope_conditions(scope_json))
         .group_by(PaperRepoState.stable_status)
     ).all()
+    known_status_total = 0
     for status, value in status_rows:
         key = status.value if isinstance(status, RepoStableStatus) else str(status)
-        if key in counts:
+        if key in {"found", "not_found", "ambiguous"}:
             counts[key] = int(value)
-            counts["unknown"] -= int(value)
+            known_status_total += int(value)
+
+    # "unknown" should include both papers with an explicit unknown repo state and
+    # papers that have not created any repo-state row yet. Compute it from the
+    # paper total instead of mutating it inside the grouped status loop so the
+    # result is stable regardless of SQL row ordering.
+    counts["unknown"] = paper_count - known_status_total
 
     repo_urls = (
         select(PaperRepoState.primary_repo_url)

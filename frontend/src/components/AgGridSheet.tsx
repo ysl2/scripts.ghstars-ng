@@ -53,6 +53,7 @@ type AgGridSheetProps<TData extends RowRecord = RowRecord> = {
   loadingLabel?: string
   progressCurrent?: number
   progressTotal?: number
+  loadingSummaryMode?: 'counts' | 'labelOnly'
   getRowClass?: (row: TData) => string | undefined
 }
 
@@ -136,7 +137,7 @@ function clampPopupToViewport(popup: HTMLElement) {
   const maxHeight = Math.max(POPUP_MIN_HEIGHT, window.innerHeight - POPUP_VIEWPORT_GUTTER * 2)
   popup.style.maxHeight = `${maxHeight}px`
 
-  const menu = popup.querySelector<HTMLElement>('.ag-menu')
+  const menu = popup.matches('.ag-menu') ? popup : popup.querySelector<HTMLElement>('.ag-menu')
   if (menu) {
     menu.style.maxHeight = `${maxHeight}px`
   }
@@ -258,6 +259,7 @@ export default function AgGridSheet<TData extends RowRecord>({
   loadingLabel = 'Loading rows…',
   progressCurrent,
   progressTotal,
+  loadingSummaryMode = 'counts',
   getRowClass,
 }: AgGridSheetProps<TData>) {
   const apiRef = useRef<GridApi<TData> | null>(null)
@@ -280,7 +282,9 @@ export default function AgGridSheet<TData extends RowRecord>({
       ? Math.max(0, Math.min(100, (Math.min(normalizedProgressCurrent, normalizedProgressTotal) / normalizedProgressTotal) * 100))
       : undefined
   const loadingSummary =
-    normalizedProgressTotal !== undefined
+    loadingSummaryMode === 'labelOnly'
+      ? loadingLabel
+      : normalizedProgressTotal !== undefined
       ? `${loadingLabel} ${Math.min(normalizedProgressCurrent, normalizedProgressTotal).toLocaleString()} / ${normalizedProgressTotal.toLocaleString()}`
       : normalizedProgressCurrent > 0
         ? `${loadingLabel} ${normalizedProgressCurrent.toLocaleString()} loaded`
@@ -435,7 +439,10 @@ export default function AgGridSheet<TData extends RowRecord>({
   }
 
   function handlePopupPostProcess(params: PostProcessPopupParams<TData>) {
-    if (!params.ePopup.querySelector('.ag-filter-body-wrapper, .ag-rich-select-list')) return
+    const isFilterPopup =
+      params.ePopup.matches('.ag-menu.ag-filter-menu') ||
+      params.ePopup.querySelector('.ag-filter, .ghstars-filter-panel, .ag-rich-select-list') !== null
+    if (!isFilterPopup) return
     bindPopupViewportHandling(params.ePopup)
   }
 
@@ -450,7 +457,12 @@ export default function AgGridSheet<TData extends RowRecord>({
             <div className="column-picker-menu">
               {columnToggles.map((column) => (
                 <label key={column.colId} className="column-picker-item">
-                  <input type="checkbox" checked={column.visible} onChange={() => toggleColumn(column.colId)} />
+                  <input
+                    type="checkbox"
+                    className="selection-checkbox"
+                    checked={column.visible}
+                    onChange={() => toggleColumn(column.colId)}
+                  />
                   <span>{column.title}</span>
                 </label>
               ))}

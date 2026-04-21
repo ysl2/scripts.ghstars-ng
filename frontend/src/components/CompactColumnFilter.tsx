@@ -1,11 +1,13 @@
 /* eslint-disable react-refresh/only-export-components */
 
-import { useMemo, useRef, useState, type HTMLAttributes, type KeyboardEvent as ReactKeyboardEvent, type RefObject } from 'react'
+import { useEffect, useMemo, useRef, useState, type HTMLAttributes, type KeyboardEvent as ReactKeyboardEvent, type RefObject } from 'react'
 import type {
   ColumnFilter,
   DateFilterModel,
   DoesFilterPassParams,
+  GridApi,
   ICombinedSimpleModel,
+  IRowNode,
   ISimpleFilterModelType,
   JoinOperator,
   NumberFilterModel,
@@ -51,12 +53,69 @@ export type CompactSetFilterParams = {
 
 type CompactSetFilterProps = CustomFilterDisplayProps<unknown, unknown, SetFilterModel> & CompactSetFilterParams
 
+type ConditionPreviewSummary =
+  | {
+      kind: 'context'
+      contextRows: number
+    }
+  | {
+      kind: 'matching'
+      contextRows: number
+      matchingRows: number
+    }
+  | {
+      kind: 'incomplete'
+      contextRows: number
+    }
+
+type SetFilterOptionStat = {
+  value: string
+  count: number
+  selected: boolean
+}
+
 type OperatorMeta = {
   value: ISimpleFilterModelType
   label: string
   inputs: 0 | 1 | 2
   firstPlaceholder?: string
   secondPlaceholder?: string
+}
+
+function compareOptionValues(left: string, right: string) {
+  return left.localeCompare(right, undefined, { sensitivity: 'base' })
+}
+
+function useGridRefreshVersion(api: GridApi<unknown>) {
+  const [version, setVersion] = useState(0)
+
+  useEffect(() => {
+    const bump = () => setVersion((current) => current + 1)
+    const eventNames = ['filterChanged', 'modelUpdated', 'rowDataUpdated'] as const
+
+    for (const eventName of eventNames) {
+      api.addEventListener(eventName, bump)
+    }
+
+    return () => {
+      for (const eventName of eventNames) {
+        api.removeEventListener(eventName, bump)
+      }
+    }
+  }, [api])
+
+  return version
+}
+
+function forEachContextLeafNode<TModel>(
+  props: CustomFilterDisplayProps<unknown, unknown, TModel>,
+  callback: (node: IRowNode<unknown>) => void,
+) {
+  props.api.forEachLeafNode((node) => {
+    if (!node.data) return
+    if (!props.doesRowPassOtherFilter(node)) return
+    callback(node)
+  })
 }
 
 const TEXT_OPERATORS: readonly OperatorMeta[] = [
@@ -479,6 +538,61 @@ function evaluateConditionModel(filterKind: ConditionFilterKind, model: CompactC
   return evaluateSingle(model as ConditionModel)
 }
 
+function hasIncompleteConditionState(filterKind: ConditionFilterKind, state: ConditionUiState) {
+  return state.conditions.some((condition) => hasDraftContent(filterKind, condition) && !isConditionActive(filterKind, condition))
+}
+
+function collectConditionPreviewSummary(
+  props: CompactConditionFilterProps,
+  filterKind: ConditionFilterKind,
+  state: ConditionUiState,
+): ConditionPreviewSummary {
+  let contextRows = 0
+  forEachContextLeafNode(props, () => {
+    contextRows += 1
+  })
+
+  if (hasIncompleteConditionState(filterKind, state)) {
+    return {
+      kind: 'incomplete',
+      contextRows,
+    }
+  }
+
+  const model = buildConditionFilterModel(filterKind, state)
+  if (model === null) {
+    return {
+      kind: 'context',
+      contextRows,
+    }
+  }
+
+  let matchingRows = 0
+  forEachContextLeafNode(props, (node) => {
+    if (evaluateConditionModel(filterKind, model, props.getValue(node))) {
+      matchingRows += 1
+    }
+  })
+
+  return {
+    kind: 'matching',
+    contextRows,
+    matchingRows,
+  }
+}
+
+function conditionPreviewLabel(summary: ConditionPreviewSummary) {
+  if (summary.kind === 'matching') {
+    return `${summary.matchingRows.toLocaleString()} matching rows`
+  }
+  if (summary.kind === 'incomplete') {
+    return summary.contextRows > 0
+      ? `Finish the filter to preview matches in ${summary.contextRows.toLocaleString()} visible rows`
+      : 'Finish the filter to preview matches'
+  }
+  return `${summary.contextRows.toLocaleString()} rows in view`
+}
+
 function stopGridKeyboardPropagation(event: ReactKeyboardEvent<HTMLElement>) {
   if (event.key === 'Escape') return
   event.stopPropagation()
@@ -598,6 +712,7 @@ function FilterValueGroup({
 function CompactConditionColumnFilter(props: CompactConditionFilterProps) {
   const operatorRef = useRef<HTMLSelectElement | null>(null)
   const firstValueRef = useRef<HTMLInputElement | null>(null)
+  const gridRefreshVersion = useGridRefreshVersion(props.api)
   const filterKind = props.filterKind
   const appliedModel = props.state.model ?? props.model
   const uiState = props.state.state as ConditionUiState | undefined
@@ -610,6 +725,10 @@ function CompactConditionColumnFilter(props: CompactConditionFilterProps) {
   const nextModel = buildConditionFilterModel(filterKind, displayState)
   const hasAnyDrafts =
     nextModel !== null || displayState.conditions.some((condition) => hasDraftContent(filterKind, condition))
+  const previewSummary = useMemo(
+    () => collectConditionPreviewSummary(props, filterKind, displayState),
+    [displayState, filterKind, gridRefreshVersion, props],
+  )
 
   useGridFilterDisplay({
     afterGuiAttached() {
@@ -728,6 +847,16 @@ function CompactConditionColumnFilter(props: CompactConditionFilterProps) {
         </div>
       </div>
 
+      <div
+        className={
+          previewSummary.kind === 'incomplete'
+            ? 'compact-filter-summary compact-filter-summary-hint'
+            : 'compact-filter-summary'
+        }
+      >
+        {conditionPreviewLabel(previewSummary)}
+      </div>
+
       <div className="ghstars-filter-footer">
         <button
           type="button"
@@ -775,36 +904,66 @@ function extractSetValues(params: CompactSetFilterParams, row: RowRecord | null 
   return Array.from(new Set(extracted.filter((value) => value.length > 0)))
 }
 
-function collectSetFilterOptions(props: CompactSetFilterProps, selectedValues: string[]) {
-  const values = new Set<string>()
-  props.api.forEachLeafNode((node) => {
-    if (!node.data) return
-    if (!props.doesRowPassOtherFilter(node)) return
+function collectSetFilterStats(
+  props: CompactSetFilterProps,
+  selectedValues: string[],
+): {
+  contextRowCount: number
+  optionCount: number
+  options: SetFilterOptionStat[]
+} {
+  const selectedValueSet = new Set(selectedValues)
+  const optionCounts = new Map<string, number>()
+  let contextRowCount = 0
+
+  forEachContextLeafNode(props, (node) => {
+    contextRowCount += 1
     const fallbackValue = props.getValue(node)
     for (const value of extractSetValues(props, node.data as RowRecord, fallbackValue)) {
-      values.add(value)
+      optionCounts.set(value, (optionCounts.get(value) ?? 0) + 1)
     }
   })
-  for (const value of selectedValues) values.add(value)
-  return Array.from(values).sort((left, right) => left.localeCompare(right, undefined, { sensitivity: 'base' }))
+
+  for (const value of selectedValues) {
+    if (!optionCounts.has(value)) {
+      optionCounts.set(value, 0)
+    }
+  }
+
+  const optionValues = Array.from(optionCounts.keys()).sort(compareOptionValues)
+  return {
+    contextRowCount,
+    optionCount: optionValues.length,
+    options: optionValues.map((value) => ({
+      value,
+      count: optionCounts.get(value) ?? 0,
+      selected: selectedValueSet.has(value),
+    })),
+  }
 }
 
 function CompactSetColumnFilter(props: CompactSetFilterProps) {
   const searchRef = useRef<HTMLInputElement | null>(null)
   const [miniFilter, setMiniFilter] = useState('')
+  const gridRefreshVersion = useGridRefreshVersion(props.api)
   const selectedValues = useMemo(
     () => normalizeSetValues(props.state.model ?? props.model) ?? [],
     [props.model, props.state.model],
   )
   const selectedValueSet = useMemo(() => new Set(selectedValues), [selectedValues])
-  const options = useMemo(() => collectSetFilterOptions(props, selectedValues), [props, selectedValues])
+  const setStats = useMemo(() => collectSetFilterStats(props, selectedValues), [gridRefreshVersion, props, selectedValues])
+  const allOptionValues = useMemo(() => setStats.options.map((option) => option.value), [setStats.options])
   const visibleOptions = useMemo(() => {
     const query = miniFilter.trim().toLowerCase()
-    if (!query) return options
-    return options.filter((option) => option.toLowerCase().includes(query))
-  }, [miniFilter, options])
-  const allSelected = options.length > 0 && options.every((option) => selectedValueSet.has(option))
+    if (!query) return setStats.options
+    return setStats.options.filter((option) => option.value.toLowerCase().includes(query))
+  }, [miniFilter, setStats.options])
+  const allSelected = props.model === null || (allOptionValues.length > 0 && allOptionValues.every((option) => selectedValueSet.has(option)))
   const noneSelected = selectedValues.length === 0 && props.model !== null
+  const queryActive = miniFilter.trim().length > 0
+  const metaLabel = queryActive
+    ? `${visibleOptions.length.toLocaleString()} of ${setStats.optionCount.toLocaleString()} options · ${setStats.contextRowCount.toLocaleString()} rows in view`
+    : `${setStats.optionCount.toLocaleString()} options · ${setStats.contextRowCount.toLocaleString()} rows in view`
 
   useGridFilterDisplay({
     afterGuiAttached() {
@@ -816,9 +975,9 @@ function CompactSetColumnFilter(props: CompactSetFilterProps) {
   })
 
   function applyValues(nextValues: string[]) {
-    const normalized = Array.from(new Set(nextValues)).sort((left, right) => left.localeCompare(right, undefined, { sensitivity: 'base' }))
+    const normalized = Array.from(new Set(nextValues)).sort(compareOptionValues)
     const nextModel =
-      normalized.length === options.length && options.every((option) => normalized.includes(option))
+      allOptionValues.length > 0 && normalized.length === allOptionValues.length && allOptionValues.every((option) => normalized.includes(option))
         ? null
         : {
             filterType: 'set' as const,
@@ -834,7 +993,7 @@ function CompactSetColumnFilter(props: CompactSetFilterProps) {
 
   function toggleOption(option: string) {
     if (selectedValues.length === 0 && props.model === null) {
-      const nextValues = options.filter((value) => value !== option)
+      const nextValues = allOptionValues.filter((value) => value !== option)
       applyValues(nextValues)
       return
     }
@@ -862,13 +1021,9 @@ function CompactSetColumnFilter(props: CompactSetFilterProps) {
       </div>
 
       <div className="compact-set-filter-meta">
-        <span>
-          {props.model === null
-            ? `${options.length.toLocaleString()} values available`
-            : `${selectedValues.length.toLocaleString()} selected`}
-        </span>
+        <span>{metaLabel}</span>
         <div className="compact-set-filter-actions">
-          <button type="button" className="compact-set-filter-action" disabled={allSelected} onClick={() => applyValues(options)}>
+          <button type="button" className="compact-set-filter-action" disabled={allSelected} onClick={() => applyValues(allOptionValues)}>
             All
           </button>
           <button type="button" className="compact-set-filter-action" disabled={noneSelected} onClick={() => applyValues([])}>
@@ -880,11 +1035,26 @@ function CompactSetColumnFilter(props: CompactSetFilterProps) {
       <div className="compact-set-filter-list" role="listbox" aria-multiselectable="true">
         {visibleOptions.length > 0 ? (
           visibleOptions.map((option) => {
-            const checked = props.model === null ? true : selectedValueSet.has(option)
+            const checked = props.model === null ? true : selectedValueSet.has(option.value)
             return (
-              <label key={option} className={checked ? 'compact-set-filter-option checked' : 'compact-set-filter-option'}>
-                <input type="checkbox" checked={checked} onChange={() => toggleOption(option)} />
-                <span title={option}>{option}</span>
+              <label
+                key={option.value}
+                role="option"
+                aria-selected={checked}
+                className={checked ? 'compact-set-filter-option checked' : 'compact-set-filter-option'}
+              >
+                <input
+                  type="checkbox"
+                  className="selection-checkbox compact-set-filter-option-input"
+                  checked={checked}
+                  onChange={() => toggleOption(option.value)}
+                />
+                <span className="compact-set-filter-option-copy">
+                  <span className="compact-set-filter-option-label" title={option.value}>
+                    {option.value}
+                  </span>
+                  <span className="compact-set-filter-option-count">{option.count.toLocaleString()}</span>
+                </span>
               </label>
             )
           })

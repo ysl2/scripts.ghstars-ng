@@ -219,7 +219,6 @@ type JobHistoryChevronCellRendererProps = CustomCellRendererProps<JobGridRow> & 
 
 type JobAttemptCellRendererProps = CustomCellRendererProps<JobGridRow>
 
-const PAPER_PREVIEW_LIMIT = 25000
 const PAPER_BATCH_SIZE = 1000
 const REPO_PREVIEW_LIMIT = 10000
 const JOB_PREVIEW_LIMIT = 500
@@ -990,14 +989,17 @@ function ForceChip({
 function QueueSummaryCard({
   summary,
   launchingJob,
+  handoffJob,
 }: {
   summary: JobQueueSummary | null
   launchingJob: StepJob | null
+  handoffJob: StepJob | null
 }) {
-  const showLaunchingState = launchingJob !== null && (!summary || summary.state === 'idle')
-  const currentJob = showLaunchingState ? null : summary?.current_job ?? null
-  const nextJob = showLaunchingState ? null : summary?.next_job ?? null
-  const counts = showLaunchingState
+  const showSubmittingState = launchingJob !== null && (!summary || summary.state === 'idle')
+  const showHandoffState = !showSubmittingState && handoffJob !== null && (!summary || summary.state === 'idle')
+  const currentJob = showSubmittingState || showHandoffState ? null : summary?.current_job ?? null
+  const nextJob = showSubmittingState || showHandoffState ? null : summary?.next_job ?? null
+  const counts = showSubmittingState || showHandoffState
     ? { running: 0, stopping: 0, pending: 1 }
     : {
         running: summary?.running ?? 0,
@@ -1010,10 +1012,15 @@ function QueueSummaryCard({
   let primary = 'Loading job queue…'
   const segments: string[] = []
 
-  if (showLaunchingState && launchingJob !== null) {
+  if (showSubmittingState && launchingJob !== null) {
     toneClassName = 'waiting'
     stateLabel = 'Submitting'
     primary = `Queuing ${stepJobLabel(launchingJob)}…`
+  } else if (showHandoffState && handoffJob !== null) {
+    toneClassName = 'waiting'
+    stateLabel = 'Queued'
+    primary = `Starting ${stepJobLabel(handoffJob)}…`
+    segments.push('Refreshing queue status')
   } else if (!summary) {
     toneClassName = 'loading'
     stateLabel = 'Loading'
@@ -1032,6 +1039,16 @@ function QueueSummaryCard({
     stateLabel = 'Waiting'
     primary = 'Waiting to start'
     segments.push(`Up next: ${queueNextJobLabel(nextJob)}`)
+  } else if (summary.state === 'active') {
+    toneClassName = 'active'
+    stateLabel = 'Running'
+    primary = 'Refreshing queue status…'
+    segments.push('Worker activity detected')
+  } else if (summary.state === 'waiting') {
+    toneClassName = 'waiting'
+    stateLabel = 'Waiting'
+    primary = 'Refreshing queue status…'
+    segments.push('Queued work detected')
   } else {
     toneClassName = 'idle'
     stateLabel = 'Idle'
@@ -1299,6 +1316,7 @@ function App() {
   const [loadingJobHistoryGroups, setLoadingJobHistoryGroups] = useState<string[]>([])
   const [selectedJobChildren, setSelectedJobChildren] = useState<Job[]>([])
   const [selectedJobAttempts, setSelectedJobAttempts] = useState<Job[]>([])
+  const [selectedJobDetail, setSelectedJobDetail] = useState<Job | null>(null)
   const [exportsData, setExportsData] = useState<ExportRow[]>([])
   const initialScopeRef = useRef<ScopeState | null>(null)
   if (initialScopeRef.current === null) {
@@ -1317,6 +1335,7 @@ function App() {
   const [selectedExportId, setSelectedExportId] = useState<string | null>(null)
   const [visibleKeys, setVisibleKeys] = useState<string[]>([])
   const [launchingJob, setLaunchingJob] = useState<StepJob | null>(null)
+  const [queueHandoffJob, setQueueHandoffJob] = useState<StepJob | null>(null)
   const [rerunningJobId, setRerunningJobId] = useState<string | null>(null)
   const [stoppingJobIds, setStoppingJobIds] = useState<string[]>([])
   const [error, setError] = useState<string | null>(null)
@@ -1325,6 +1344,7 @@ function App() {
   const [tableRefreshTick, setTableRefreshTick] = useState(0)
   const [lastRefreshedAt, setLastRefreshedAt] = useState<string | null>(null)
   const [selectedPaperLoading, setSelectedPaperLoading] = useState(false)
+  const [selectedJobDetailLoading, setSelectedJobDetailLoading] = useState(false)
   const [selectedJobChildrenLoading, setSelectedJobChildrenLoading] = useState(false)
   const [selectedJobAttemptsLoading, setSelectedJobAttemptsLoading] = useState(false)
   const [papersLoading, setPapersLoading] = useState(false)
@@ -1339,8 +1359,11 @@ function App() {
   const latestJobByGroupRef = useRef<Map<string, Job>>(new Map())
   const childJobAbortControllersRef = useRef<Map<string, AbortController>>(new Map())
   const historyAbortControllersRef = useRef<Map<string, AbortController>>(new Map())
+  const queueHandoffTimeoutRef = useRef<number | null>(null)
+  const selectedJobDetailHydratedJobIdRef = useRef<string | null>(null)
   const selectedJobChildrenHydratedJobIdRef = useRef<string | null>(null)
   const selectedJobAttemptsHydratedJobIdRef = useRef<string | null>(null)
+  const [selectedJobRefreshTick, setSelectedJobRefreshTick] = useState(0)
 
   const exportBaseName = normalizeExportBaseName(exportOutputName).trim()
   const exportNameValid = exportBaseName.length > 0
@@ -1465,6 +1488,26 @@ function App() {
     (dashboard?.pending_jobs ?? 0) > 0 ||
     (dashboard?.running_jobs ?? 0) > 0 ||
     (dashboard?.stopping_jobs ?? 0) > 0
+
+  useEffect(() => {
+    const queueState = dashboard?.job_queue_summary.state ?? 'idle'
+    if (queueState !== 'idle') {
+      setQueueHandoffJob(null)
+      if (queueHandoffTimeoutRef.current !== null) {
+        window.clearTimeout(queueHandoffTimeoutRef.current)
+        queueHandoffTimeoutRef.current = null
+      }
+    }
+  }, [dashboard?.job_queue_summary.state])
+
+  useEffect(() => {
+    return () => {
+      if (queueHandoffTimeoutRef.current !== null) {
+        window.clearTimeout(queueHandoffTimeoutRef.current)
+        queueHandoffTimeoutRef.current = null
+      }
+    }
+  }, [])
 
   useEffect(() => {
     const intervalMs = hasActiveJobs ? ACTIVE_DASHBOARD_POLL_MS : IDLE_DASHBOARD_POLL_MS
@@ -1739,10 +1782,9 @@ function App() {
       setPapersLoadedCount(0)
 
       try {
-        for (let offset = 0; offset < PAPER_PREVIEW_LIMIT; offset += PAPER_BATCH_SIZE) {
-          const limit = Math.min(PAPER_BATCH_SIZE, PAPER_PREVIEW_LIMIT - offset)
+        for (let offset = 0; ; offset += PAPER_BATCH_SIZE) {
           const batch = await fetchJson<PaperSummary[]>(
-            `/api/v1/papers?limit=${limit}&offset=${offset}`,
+            `/api/v1/papers?limit=${PAPER_BATCH_SIZE}&offset=${offset}`,
             { signal: controller.signal },
           )
           nextRows.push(...batch)
@@ -1752,7 +1794,7 @@ function App() {
             setPapers([...nextRows])
           }
 
-          if (batch.length < limit || nextRows.length >= PAPER_PREVIEW_LIMIT) {
+          if (batch.length < PAPER_BATCH_SIZE) {
             break
           }
         }
@@ -1943,6 +1985,14 @@ function App() {
         method: 'POST',
         body: JSON.stringify(payload),
       })
+      if (queueHandoffTimeoutRef.current !== null) {
+        window.clearTimeout(queueHandoffTimeoutRef.current)
+      }
+      setQueueHandoffJob(jobType)
+      queueHandoffTimeoutRef.current = window.setTimeout(() => {
+        setQueueHandoffJob(null)
+        queueHandoffTimeoutRef.current = null
+      }, 3000)
       setSummaryRefreshTick((value) => value + 1)
       setJobsRefreshTick((value) => value + 1)
       setTableRefreshTick((value) => value + 1)
@@ -1952,6 +2002,11 @@ function App() {
         if (exportMenuRef.current) exportMenuRef.current.open = false
       }
     } catch (err) {
+      if (queueHandoffTimeoutRef.current !== null) {
+        window.clearTimeout(queueHandoffTimeoutRef.current)
+        queueHandoffTimeoutRef.current = null
+      }
+      setQueueHandoffJob(null)
       if (err instanceof Error) setError(err.message)
     } finally {
       setLaunchingJob(null)
@@ -2427,20 +2482,19 @@ function App() {
     for (const job of jobs) result.set(job.id, job)
     for (const job of loadedChildJobs) result.set(job.id, job)
     for (const job of jobHistoryList) result.set(job.id, job)
-    for (const job of selectedJobChildren) result.set(job.id, job)
-    for (const job of selectedJobAttempts) result.set(job.id, job)
     return result
-  }, [jobHistoryList, jobs, loadedChildJobs, selectedJobAttempts, selectedJobChildren])
+  }, [jobHistoryList, jobs, loadedChildJobs])
 
   const selectedPaperSummary = papers.find((paper) => paper.arxiv_id === selectedPaperId) || null
   const selectedPaperDetail = (selectedPaperId ? paperDetailsById[selectedPaperId] : null) || null
   const selectedPaper = selectedPaperDetail ?? selectedPaperSummary
-  const selectedJob = (selectedJobId ? jobsById.get(selectedJobId) : null) || null
+  const selectedJobSummary = (selectedJobId ? jobsById.get(selectedJobId) : null) || null
+  const selectedJob = selectedJobDetail?.id === selectedJobId ? selectedJobDetail : selectedJobSummary
   const selectedExport = exportsData.find((row) => row.id === selectedExportId) || null
   const selectedJobCanRerun = selectedJob ? canRerunJob(selectedJob) : false
   const selectedJobCanStop = selectedJob ? canStopJob(selectedJob) : false
-  const paperProgressTotal =
-    dashboard && dashboard.papers > 0 ? Math.min(dashboard.papers, PAPER_PREVIEW_LIMIT) : undefined
+  const paperTotalRows = Math.max(dashboard?.papers ?? 0, papers.length, papersLoadedCount)
+  const paperProgressTotal = paperTotalRows > 0 ? paperTotalRows : undefined
   const selectedJobLatestChildren = useMemo(
     () =>
       selectedJobChildren
@@ -2450,7 +2504,59 @@ function App() {
   )
 
   useEffect(() => {
+    if (previewTab !== 'jobs' || !selectedJobId) {
+      setSelectedJobRefreshTick(0)
+      return
+    }
+    setSelectedJobRefreshTick((value) => value + 1)
+    const timer = window.setInterval(() => setSelectedJobRefreshTick((value) => value + 1), ACTIVE_JOBS_POLL_MS)
+    return () => window.clearInterval(timer)
+  }, [previewTab, selectedJobId])
+
+  useEffect(() => {
     let cancelled = false
+    const controller = new AbortController()
+
+    async function loadSelectedJobDetail() {
+      if (previewTab !== 'jobs' || !selectedJobId) {
+        selectedJobDetailHydratedJobIdRef.current = null
+        setSelectedJobDetail(null)
+        setSelectedJobDetailLoading(false)
+        return
+      }
+
+      const needsBlockingLoad = selectedJobDetailHydratedJobIdRef.current !== selectedJobId
+
+      if (needsBlockingLoad) {
+        setSelectedJobDetailLoading(true)
+      }
+
+      try {
+        const data = await fetchJson<Job>(`/api/v1/jobs/${selectedJobId}`, {
+          signal: controller.signal,
+        })
+        if (cancelled) return
+        selectedJobDetailHydratedJobIdRef.current = selectedJobId
+        setSelectedJobDetail(data)
+        setSelectedJobDetailLoading(false)
+      } catch (err) {
+        if (cancelled || isAbortError(err) || !(err instanceof Error)) return
+        setSelectedJobDetailLoading(false)
+        setError(err.message)
+      }
+    }
+
+    void loadSelectedJobDetail()
+
+    return () => {
+      cancelled = true
+      controller.abort()
+    }
+  }, [previewTab, selectedJobId, selectedJobRefreshTick])
+
+  useEffect(() => {
+    let cancelled = false
+    const controller = new AbortController()
 
     async function loadSelectedPaperDetail() {
       if (previewTab !== 'papers' || !selectedPaperId) {
@@ -2461,12 +2567,14 @@ function App() {
       setSelectedPaperLoading(true)
 
       try {
-        const data = await fetchJson<PaperDetail>(`/api/v1/papers/${selectedPaperId}`)
+        const data = await fetchJson<PaperDetail>(`/api/v1/papers/${selectedPaperId}`, {
+          signal: controller.signal,
+        })
         if (cancelled) return
         setPaperDetailsById((current) => ({ ...current, [data.arxiv_id]: data }))
         setSelectedPaperLoading(false)
       } catch (err) {
-        if (cancelled || !(err instanceof Error)) return
+        if (cancelled || isAbortError(err) || !(err instanceof Error)) return
         setSelectedPaperLoading(false)
         setError(err.message)
       }
@@ -2476,11 +2584,13 @@ function App() {
 
     return () => {
       cancelled = true
+      controller.abort()
     }
   }, [previewTab, selectedPaperId, tableRefreshTick])
 
   useEffect(() => {
     let cancelled = false
+    const controller = new AbortController()
 
     async function loadSelectedJobChildren() {
       if (previewTab !== 'jobs' || !selectedJob || selectedJob.job_type !== 'sync_arxiv_batch') {
@@ -2498,13 +2608,15 @@ function App() {
       }
 
       try {
-        const data = await fetchJson<Job[]>(`/api/v1/jobs?parent_id=${selectedJob.id}&limit=${JOB_PREVIEW_LIMIT}&view=all`)
+        const data = await fetchJson<Job[]>(`/api/v1/jobs?parent_id=${selectedJob.id}&limit=${JOB_PREVIEW_LIMIT}&view=all`, {
+          signal: controller.signal,
+        })
         if (cancelled) return
         selectedJobChildrenHydratedJobIdRef.current = selectedJob.id
         setSelectedJobChildren(data)
         setSelectedJobChildrenLoading(false)
       } catch (err) {
-        if (cancelled || !(err instanceof Error)) return
+        if (cancelled || isAbortError(err) || !(err instanceof Error)) return
         setSelectedJobChildrenLoading(false)
         setError(err.message)
       }
@@ -2514,8 +2626,9 @@ function App() {
 
     return () => {
       cancelled = true
+      controller.abort()
     }
-  }, [jobsRefreshTick, previewTab, selectedJob])
+  }, [previewTab, selectedJob?.id, selectedJob?.job_type, selectedJobRefreshTick])
 
   const selectedJobLatestAttempt = useMemo(
     () => selectedJobAttempts.find((job) => isLatestAttempt(job)) || selectedJob,
@@ -2524,6 +2637,7 @@ function App() {
 
   useEffect(() => {
     let cancelled = false
+    const controller = new AbortController()
 
     async function loadSelectedJobAttempts() {
       if (previewTab !== 'jobs' || !selectedJob) {
@@ -2535,7 +2649,7 @@ function App() {
 
       if (selectedJob.attempt_count <= 1) {
         selectedJobAttemptsHydratedJobIdRef.current = selectedJob.id
-        setSelectedJobAttempts([selectedJob])
+        setSelectedJobAttempts([])
         setSelectedJobAttemptsLoading(false)
         return
       }
@@ -2548,13 +2662,15 @@ function App() {
       }
 
       try {
-        const data = await fetchJson<Job[]>(`/api/v1/jobs/${selectedJob.id}/attempts?limit=${JOB_PREVIEW_LIMIT}`)
+        const data = await fetchJson<Job[]>(`/api/v1/jobs/${selectedJob.id}/attempts?limit=${JOB_PREVIEW_LIMIT}`, {
+          signal: controller.signal,
+        })
         if (cancelled) return
         selectedJobAttemptsHydratedJobIdRef.current = selectedJob.id
         setSelectedJobAttempts(data)
         setSelectedJobAttemptsLoading(false)
       } catch (err) {
-        if (cancelled || !(err instanceof Error)) return
+        if (cancelled || isAbortError(err) || !(err instanceof Error)) return
         setSelectedJobAttemptsLoading(false)
         setError(err.message)
       }
@@ -2564,15 +2680,19 @@ function App() {
 
     return () => {
       cancelled = true
+      controller.abort()
     }
-  }, [jobsRefreshTick, previewTab, selectedJob])
+  }, [previewTab, selectedJob?.attempt_count, selectedJob?.id, selectedJobRefreshTick])
 
   function closeDrawer() {
+    selectedJobDetailHydratedJobIdRef.current = null
     selectedJobChildrenHydratedJobIdRef.current = null
     selectedJobAttemptsHydratedJobIdRef.current = null
     setSelectedPaperId(null)
     setSelectedJobId(null)
     setSelectedExportId(null)
+    setSelectedJobDetail(null)
+    setSelectedJobDetailLoading(false)
     setSelectedJobChildren([])
     setSelectedJobAttempts([])
   }
@@ -2587,11 +2707,14 @@ function App() {
     setPreviewTab(nextTab)
     setTableSearch('')
     setVisibleKeys([])
+    selectedJobDetailHydratedJobIdRef.current = null
     selectedJobChildrenHydratedJobIdRef.current = null
     selectedJobAttemptsHydratedJobIdRef.current = null
     setSelectedPaperId(null)
     setSelectedJobId(null)
     setSelectedExportId(null)
+    setSelectedJobDetail(null)
+    setSelectedJobDetailLoading(false)
     setSelectedJobChildren([])
     setSelectedJobAttempts([])
     setExpandedParentJobIds([])
@@ -2765,6 +2888,7 @@ function App() {
             <span className="meta-chip">{selectedJobIsBatchFolder ? `${selectedJob.attempt_count} total batch runs` : `${selectedJob.attempt_count} total attempts`}</span>
             <span className="meta-chip">worker attempts {selectedJob.attempts}</span>
             <span className="meta-chip">{formatTime(selectedJob.created_at)}</span>
+            {selectedJobDetailLoading ? <span className="meta-chip">Refreshing…</span> : null}
           </div>
 
           <DetailBlock label="Job id" value={<span className="mono-cell">{selectedJob.id}</span>} />
@@ -2922,9 +3046,16 @@ function App() {
   }
 
   const activeLoadedRows = previewTab === 'papers' ? papers.length : previewTab === 'jobs' ? jobRows.length : exportsData.length
-  const activeTotalRows =
-    previewTab === 'papers' ? paperProgressTotal ?? activeLoadedRows : activeLoadedRows
-  const visibleRowsLabel = `${visibleKeys.length.toLocaleString()} rows visible, ${activeTotalRows.toLocaleString()} rows in total`
+  const activeTotalRows = previewTab === 'papers' ? paperTotalRows : activeLoadedRows
+  const defaultVisibleRowsLabel = `${visibleKeys.length.toLocaleString()} rows visible, ${activeTotalRows.toLocaleString()} rows in total`
+  const paperSummaryLabel = papersLoading
+    ? paperProgressTotal !== undefined
+      ? papersLoadedCount > 0
+        ? `${Math.min(papersLoadedCount, paperProgressTotal).toLocaleString()} loaded, ${paperProgressTotal.toLocaleString()} total`
+        : `Loading ${paperProgressTotal.toLocaleString()} rows…`
+      : 'Loading papers…'
+    : `${visibleKeys.length.toLocaleString()} rows visible, ${(paperProgressTotal ?? papers.length).toLocaleString()} rows in total`
+  const tableSummaryLabel = previewTab === 'papers' ? paperSummaryLabel : defaultVisibleRowsLabel
   const quickSearchPlaceholder =
     previewTab === 'papers'
       ? 'Search title, abstract, authors, repo...'
@@ -2958,7 +3089,7 @@ function App() {
     </label>
   )
 
-  const sheetToolbarSummary = <span className="sheet-inline-summary">{visibleRowsLabel}</span>
+  const sheetToolbarSummary = <span className="sheet-inline-summary">{tableSummaryLabel}</span>
 
   const sheetToolbarActions = (
     <button
@@ -3064,6 +3195,7 @@ function App() {
         toolbarAfterSummary={sheetToolbarExport}
         loading={papersLoading}
         loadingLabel={papers.length > 0 ? 'Refreshing papers…' : 'Loading papers…'}
+        loadingSummaryMode="labelOnly"
         progressCurrent={papersLoadedCount}
         progressTotal={paperProgressTotal}
       />
@@ -3280,7 +3412,11 @@ function App() {
         </div>
 
         <div className="feedback-strip">
-          <QueueSummaryCard summary={dashboard?.job_queue_summary ?? null} launchingJob={launchingJob} />
+          <QueueSummaryCard
+            summary={dashboard?.job_queue_summary ?? null}
+            launchingJob={launchingJob}
+            handoffJob={queueHandoffJob}
+          />
           {error ? <div className="error-box">{error}</div> : null}
         </div>
       </section>

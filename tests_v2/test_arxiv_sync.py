@@ -438,8 +438,79 @@ def test_dashboard_stats_and_scoped_repos_track_enriched_scope(db_env):
 
     assert stats["papers"] == 2
     assert stats["found"] == 2
+    assert stats["unknown"] == 0
     assert stats["repos"] == 1
     assert [repo.normalized_github_url for repo in repos] == ["https://github.com/foo/in-scope"]
+
+
+def test_dashboard_stats_count_unknown_from_missing_and_unknown_repo_states(db_env):
+    _insert_scoped_paper("2504.10001", date(2025, 4, 10))
+    _insert_scoped_paper("2504.10002", date(2025, 4, 10))
+    _insert_scoped_paper("2504.10003", date(2025, 4, 10))
+    _insert_scoped_paper("2504.10004", date(2025, 4, 10))
+    _insert_scoped_paper("2504.10005", date(2025, 4, 10))
+
+    with session_scope() as db:
+        db.add(
+            PaperRepoState(
+                arxiv_id="2504.10001",
+                stable_status=RepoStableStatus.found,
+                primary_repo_url="https://github.com/foo/found",
+                repo_urls_json=["https://github.com/foo/found"],
+                stable_decided_at=utc_now(),
+                refresh_after=utc_now(),
+                last_attempt_at=utc_now(),
+                last_attempt_complete=True,
+            )
+        )
+        db.add(
+            PaperRepoState(
+                arxiv_id="2504.10002",
+                stable_status=RepoStableStatus.not_found,
+                primary_repo_url=None,
+                repo_urls_json=[],
+                stable_decided_at=utc_now(),
+                refresh_after=utc_now(),
+                last_attempt_at=utc_now(),
+                last_attempt_complete=True,
+            )
+        )
+        db.add(
+            PaperRepoState(
+                arxiv_id="2504.10003",
+                stable_status=RepoStableStatus.ambiguous,
+                primary_repo_url="https://github.com/foo/ambiguous-a",
+                repo_urls_json=[
+                    "https://github.com/foo/ambiguous-a",
+                    "https://github.com/foo/ambiguous-b",
+                ],
+                stable_decided_at=utc_now(),
+                refresh_after=utc_now(),
+                last_attempt_at=utc_now(),
+                last_attempt_complete=True,
+            )
+        )
+        db.add(
+            PaperRepoState(
+                arxiv_id="2504.10004",
+                stable_status=RepoStableStatus.unknown,
+                primary_repo_url=None,
+                repo_urls_json=[],
+                stable_decided_at=None,
+                refresh_after=None,
+                last_attempt_at=utc_now(),
+                last_attempt_complete=False,
+            )
+        )
+
+    with session_scope() as db:
+        stats = get_dashboard_stats(db, {})
+
+    assert stats["papers"] == 5
+    assert stats["found"] == 1
+    assert stats["not_found"] == 1
+    assert stats["ambiguous"] == 1
+    assert stats["unknown"] == 2
 
 
 def test_backfill_arxiv_archive_appearances_uses_stored_listing_html(db_env):
