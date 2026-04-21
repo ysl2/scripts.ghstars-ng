@@ -223,9 +223,9 @@ const PAPER_PREVIEW_LIMIT = 25000
 const PAPER_BATCH_SIZE = 1000
 const REPO_PREVIEW_LIMIT = 10000
 const JOB_PREVIEW_LIMIT = 500
-const ACTIVE_DASHBOARD_POLL_MS = 2000
+const ACTIVE_DASHBOARD_POLL_MS = 1000
 const IDLE_DASHBOARD_POLL_MS = 8000
-const ACTIVE_JOBS_POLL_MS = 2000
+const ACTIVE_JOBS_POLL_MS = 1000
 const PASSIVE_JOBS_POLL_MS = 5000
 const LEGACY_SCOPE_STORAGE_KEY = 'ghstars:scope:v3'
 const OLDER_SCOPE_STORAGE_KEY = 'ghstars:scope:v4'
@@ -3129,7 +3129,7 @@ function App() {
           <span className="meta-chip">database: {health?.database_dialect ?? 'loading'}</span>
           <span className="meta-chip">{githubRuntimeLabel}</span>
           <span className="meta-chip">refreshed: {formatClock(lastRefreshedAt)}</span>
-          <span className="meta-chip">{hasActiveJobs ? 'jobs/dashboard 2s · tables 20s' : previewTab === 'jobs' ? 'jobs 5s · dashboard 8s' : 'idle · dashboard 8s'}</span>
+          <span className="meta-chip">{hasActiveJobs ? 'jobs/dashboard 1s · tables 20s' : previewTab === 'jobs' ? 'jobs 5s · dashboard 8s' : 'idle · dashboard 8s'}</span>
         </div>
 
         <div className="stats-bar header-stats">
