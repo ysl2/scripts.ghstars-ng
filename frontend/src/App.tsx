@@ -1059,6 +1059,8 @@ function App() {
   const latestJobByGroupRef = useRef<Map<string, Job>>(new Map())
   const childJobAbortControllersRef = useRef<Map<string, AbortController>>(new Map())
   const historyAbortControllersRef = useRef<Map<string, AbortController>>(new Map())
+  const selectedJobChildrenHydratedJobIdRef = useRef<string | null>(null)
+  const selectedJobAttemptsHydratedJobIdRef = useRef<string | null>(null)
 
   const exportBaseName = normalizeExportBaseName(exportOutputName).trim()
   const exportNameValid = exportBaseName.length > 0
@@ -1663,7 +1665,6 @@ function App() {
         setExportOutputName('')
         if (exportMenuRef.current) exportMenuRef.current.open = false
       }
-      if (jobType === 'sync-links' || jobType === 'sync-arxiv') setPreviewTab('papers')
     } catch (err) {
       if (err instanceof Error) setError(err.message)
     } finally {
@@ -2169,17 +2170,23 @@ function App() {
 
     async function loadSelectedJobChildren() {
       if (previewTab !== 'jobs' || !selectedJob || selectedJob.job_type !== 'sync_arxiv_batch') {
+        selectedJobChildrenHydratedJobIdRef.current = null
         setSelectedJobChildren([])
         setSelectedJobChildrenLoading(false)
         return
       }
 
-      setSelectedJobChildren([])
-      setSelectedJobChildrenLoading(true)
+      const needsBlockingLoad = selectedJobChildrenHydratedJobIdRef.current !== selectedJob.id
+
+      if (needsBlockingLoad) {
+        setSelectedJobChildren([])
+        setSelectedJobChildrenLoading(true)
+      }
 
       try {
         const data = await fetchJson<Job[]>(`/api/v1/jobs?parent_id=${selectedJob.id}&limit=${JOB_PREVIEW_LIMIT}&view=all`)
         if (cancelled) return
+        selectedJobChildrenHydratedJobIdRef.current = selectedJob.id
         setSelectedJobChildren(data)
         setSelectedJobChildrenLoading(false)
       } catch (err) {
@@ -2206,23 +2213,30 @@ function App() {
 
     async function loadSelectedJobAttempts() {
       if (previewTab !== 'jobs' || !selectedJob) {
+        selectedJobAttemptsHydratedJobIdRef.current = null
         setSelectedJobAttempts([])
         setSelectedJobAttemptsLoading(false)
         return
       }
 
       if (selectedJob.attempt_count <= 1) {
+        selectedJobAttemptsHydratedJobIdRef.current = selectedJob.id
         setSelectedJobAttempts([selectedJob])
         setSelectedJobAttemptsLoading(false)
         return
       }
 
-      setSelectedJobAttempts([])
-      setSelectedJobAttemptsLoading(true)
+      const needsBlockingLoad = selectedJobAttemptsHydratedJobIdRef.current !== selectedJob.id
+
+      if (needsBlockingLoad) {
+        setSelectedJobAttempts([])
+        setSelectedJobAttemptsLoading(true)
+      }
 
       try {
         const data = await fetchJson<Job[]>(`/api/v1/jobs/${selectedJob.id}/attempts?limit=${JOB_PREVIEW_LIMIT}`)
         if (cancelled) return
+        selectedJobAttemptsHydratedJobIdRef.current = selectedJob.id
         setSelectedJobAttempts(data)
         setSelectedJobAttemptsLoading(false)
       } catch (err) {
@@ -2240,6 +2254,8 @@ function App() {
   }, [jobsRefreshTick, previewTab, selectedJob])
 
   function closeDrawer() {
+    selectedJobChildrenHydratedJobIdRef.current = null
+    selectedJobAttemptsHydratedJobIdRef.current = null
     setSelectedPaperId(null)
     setSelectedJobId(null)
     setSelectedExportId(null)
@@ -2257,6 +2273,8 @@ function App() {
     setPreviewTab(nextTab)
     setTableSearch('')
     setVisibleKeys([])
+    selectedJobChildrenHydratedJobIdRef.current = null
+    selectedJobAttemptsHydratedJobIdRef.current = null
     setSelectedPaperId(null)
     setSelectedJobId(null)
     setSelectedExportId(null)
