@@ -10,6 +10,14 @@ import {
 } from 'react'
 import type { CustomCellRendererProps } from 'ag-grid-react'
 import AgGridSheet, { type SheetColumn } from './components/AgGridSheet'
+import {
+  compactDateColumnFilter,
+  compactDateFilterParams,
+  compactNumberColumnFilter,
+  compactNumberFilterParams,
+  compactValueColumnFilter,
+  createCompactSetFilterParams,
+} from './components/CompactColumnFilter'
 import usePointerDownOutside from './hooks/usePointerDownOutside'
 import './App.css'
 
@@ -1632,7 +1640,8 @@ function App() {
           arxiv_id: paper.arxiv_id,
           title: paper.title,
           authors: paper.authors_json.join(', '),
-          primary_category: paper.primary_category || '',
+          categories: paper.categories_json,
+          categories_label: paper.categories_json.join(', ') || paper.primary_category || '',
           published_at: paper.published_at || '',
           repo_label: paper.primary_repo_url ? repoLabel(paper.primary_repo_url) : '',
           repo_url: paper.primary_repo_url || '',
@@ -1796,6 +1805,8 @@ function App() {
         field: 'link_status',
         headerName: 'Status',
         width: columnWidth('Status', 118),
+        filter: compactValueColumnFilter,
+        filterParams: createCompactSetFilterParams(),
         cellClass: (params) => statusCellClass(params.value),
       },
       {
@@ -1805,11 +1816,27 @@ function App() {
         cellClass: 'mono-cell',
       },
       { field: 'title', headerName: 'Title', width: columnWidth('Title', 440) },
-      { field: 'primary_category', headerName: 'Category', width: columnWidth('Category', 130) },
+      {
+        field: 'categories_label',
+        headerName: 'Category',
+        width: columnWidth('Category', 220),
+        filter: compactValueColumnFilter,
+        filterParams: createCompactSetFilterParams({
+          extractValues: (row) =>
+            Array.isArray(row.categories)
+              ? row.categories
+                  .map((value) => String(value ?? '').trim())
+                  .filter((value) => value.length > 0)
+              : [],
+          searchPlaceholder: 'Search categories',
+        }),
+      },
       {
         field: 'published_at',
         headerName: 'Published',
         width: columnWidth('Published', 132),
+        filter: compactDateColumnFilter,
+        filterParams: compactDateFilterParams,
         valueFormatter: (params) => formatDate(String(params.value || '')),
       },
       { field: 'repo_label', headerName: 'Repo', width: columnWidth('Repo', 220), cellClass: 'mono-cell' },
@@ -1817,13 +1844,16 @@ function App() {
         field: 'repo_stars',
         headerName: 'Stars',
         width: columnWidth('Stars', 108),
-        filter: 'agNumberColumnFilter',
+        filter: compactNumberColumnFilter,
+        filterParams: compactNumberFilterParams,
         cellClass: 'number-cell',
       },
       {
         field: 'refresh_after',
         headerName: 'Refresh After',
         width: columnWidth('Refresh After', 182),
+        filter: compactDateColumnFilter,
+        filterParams: compactDateFilterParams,
         valueFormatter: (params) => formatTime(String(params.value || '')),
       },
       { field: 'authors', headerName: 'Authors', width: columnWidth('Authors', 320), hide: true },
@@ -1911,9 +1941,17 @@ function App() {
         field: 'status',
         headerName: 'Status',
         width: columnWidth('Status', 132),
+        filter: compactValueColumnFilter,
+        filterParams: createCompactSetFilterParams(),
         cellClass: (params) => statusCellClass(params.value),
       },
-      { field: 'job_type', headerName: 'Job Type', width: columnWidth('Job Type', 180) },
+      {
+        field: 'job_type',
+        headerName: 'Job Type',
+        width: columnWidth('Job Type', 180),
+        filter: compactValueColumnFilter,
+        filterParams: createCompactSetFilterParams(),
+      },
       { field: 'scope_label', headerName: 'Scope', width: columnWidth('Scope', 320) },
       {
         field: 'attempt_relation_label',
@@ -1930,6 +1968,8 @@ function App() {
         field: 'created_at',
         headerName: 'Created',
         width: columnWidth('Created', 172),
+        filter: compactDateColumnFilter,
+        filterParams: compactDateFilterParams,
         valueFormatter: (params) => formatTime(String(params.value || '')),
       },
       { field: 'summary', headerName: 'Summary', width: columnWidth('Summary', 420) },
@@ -1976,6 +2016,8 @@ function App() {
         field: 'created_at',
         headerName: 'Created',
         width: columnWidth('Created', 180),
+        filter: compactDateColumnFilter,
+        filterParams: compactDateFilterParams,
         valueFormatter: (params) => formatTime(String(params.value || '')),
       },
       { field: 'id', headerName: 'Export ID', width: columnWidth('Export ID', 280), hide: true, cellClass: 'mono-cell' },
@@ -2135,6 +2177,9 @@ function App() {
   }
 
   function handlePreviewTabChange(nextTab: PreviewTab) {
+    if (nextTab === previewTab) {
+      return
+    }
     if (previewTab === 'jobs' && nextTab !== 'jobs') {
       cancelAllJobTreeLoads()
     }
@@ -2445,7 +2490,126 @@ function App() {
   const activeLoadedRows = previewTab === 'papers' ? papers.length : previewTab === 'jobs' ? jobRows.length : exportsData.length
   const activeTotalRows =
     previewTab === 'papers' ? paperProgressTotal ?? activeLoadedRows : activeLoadedRows
-  const visibleRowsLabel = `${visibleKeys.length.toLocaleString()} visible of ${activeTotalRows.toLocaleString()} total`
+  const visibleRowsLabel = `${visibleKeys.length.toLocaleString()} rows visible, ${activeTotalRows.toLocaleString()} rows in total`
+  const quickSearchPlaceholder =
+    previewTab === 'papers'
+      ? 'Search title, abstract, authors, repo...'
+      : previewTab === 'jobs'
+        ? 'Search job id, scope, summary...'
+        : 'Search export name or scope...'
+
+  const sheetToolbarLeading = (
+    <div className="tab-strip">
+      <button type="button" className={previewTab === 'papers' ? 'tab-button active' : 'tab-button'} onClick={() => handlePreviewTabChange('papers')}>
+        Papers
+      </button>
+      <button type="button" className={previewTab === 'jobs' ? 'tab-button active' : 'tab-button'} onClick={() => handlePreviewTabChange('jobs')}>
+        Jobs
+      </button>
+      <button type="button" className={previewTab === 'exports' ? 'tab-button active' : 'tab-button'} onClick={() => handlePreviewTabChange('exports')}>
+        Exports
+      </button>
+    </div>
+  )
+
+  const sheetToolbarSearch = (
+    <label className="sheet-search-field">
+      <input
+        className="floating-placeholder-input"
+        value={tableSearch}
+        onChange={(event) => setTableSearch(event.target.value)}
+        placeholder={quickSearchPlaceholder}
+        aria-label="Quick search"
+      />
+    </label>
+  )
+
+  const sheetToolbarSummary = <span className="sheet-inline-summary">{visibleRowsLabel}</span>
+
+  const sheetToolbarActions = (
+    <button
+      type="button"
+      className="ghost-button refresh-button"
+      onClick={() => {
+        setSummaryRefreshTick((value) => value + 1)
+        setJobsRefreshTick((value) => value + 1)
+        setTableRefreshTick((value) => value + 1)
+      }}
+    >
+      Refresh
+    </button>
+  )
+
+  const sheetToolbarExport =
+    previewTab === 'papers' ? (
+      <details ref={exportMenuRef} className="export-menu">
+        <summary className="primary-button export-menu-trigger">Export CSV</summary>
+        <div className="export-menu-panel">
+          <div className="form-field">
+            <span className="field-label">Export scope</span>
+            <div className="segmented-control export-mode-control" role="tablist" aria-label="Export mode">
+              <button
+                type="button"
+                className={exportMode === 'all_papers' ? 'segment-button active' : 'segment-button'}
+                onClick={() => setExportMode('all_papers')}
+              >
+                Full export
+              </button>
+              <button
+                type="button"
+                className={exportMode === 'papers_view' ? 'segment-button active' : 'segment-button'}
+                onClick={() => setExportMode('papers_view')}
+              >
+                Current view
+              </button>
+            </div>
+            <span className="inline-note">
+              {exportMode === 'all_papers'
+                ? `Export all ${dashboard?.papers ?? papers.length} papers from the local database.`
+                : `Export ${filteredPaperIds.length} visible papers in the current filter and sort order.`}
+            </span>
+          </div>
+
+          <label className="form-field">
+            <span className="field-label">Export name</span>
+            <div className="input-with-suffix">
+              <input
+                className="floating-placeholder-input suffix-input"
+                value={exportOutputName}
+                onChange={(event) => setExportOutputName(normalizeExportBaseName(event.target.value))}
+                placeholder="cv-weekly-2026-04-19"
+              />
+              <span className="input-suffix">.csv</span>
+            </div>
+          </label>
+
+          <div className="export-menu-actions">
+            <button
+              type="button"
+              className="primary-button"
+              onClick={() => launchJob('export')}
+              disabled={
+                launchingJob !== null ||
+                !exportNameValid ||
+                (exportMode === 'papers_view' && !filteredPaperExportReady)
+              }
+            >
+              {launchingJob === 'export' ? 'Running…' : 'Queue export'}
+            </button>
+            <button
+              type="button"
+              className="ghost-button"
+              onClick={() => {
+                handlePreviewTabChange('exports')
+                setBannerAction(null)
+              }}
+            >
+              View exports
+            </button>
+          </div>
+        </div>
+      </details>
+    ) : null
 
   const activeGrid =
     previewTab === 'papers' ? (
@@ -2460,7 +2624,11 @@ function App() {
         quickSearch={deferredTableSearch}
         persistenceId="ghstars-papers"
         emptyMessage="No papers are stored yet."
-        toolbarSummary={visibleRowsLabel}
+        toolbarLeading={sheetToolbarLeading}
+        toolbarActions={sheetToolbarActions}
+        toolbarSearch={sheetToolbarSearch}
+        toolbarSummary={sheetToolbarSummary}
+        toolbarAfterSummary={sheetToolbarExport}
         loading={papersLoading}
         loadingLabel={papers.length > 0 ? 'Refreshing papers…' : 'Loading papers…'}
         progressCurrent={papersLoadedCount}
@@ -2478,7 +2646,10 @@ function App() {
         quickSearch={deferredTableSearch}
         persistenceId="ghstars-jobs"
         emptyMessage="No jobs yet."
-        toolbarSummary={visibleRowsLabel}
+        toolbarLeading={sheetToolbarLeading}
+        toolbarActions={sheetToolbarActions}
+        toolbarSearch={sheetToolbarSearch}
+        toolbarSummary={sheetToolbarSummary}
         getRowClass={(row) => {
           const classes: string[] = []
           if (row.row_kind === 'child') classes.push('sheet-row-child')
@@ -2499,7 +2670,10 @@ function App() {
         quickSearch={deferredTableSearch}
         persistenceId="ghstars-exports"
         emptyMessage="No exports yet."
-        toolbarSummary={visibleRowsLabel}
+        toolbarLeading={sheetToolbarLeading}
+        toolbarActions={sheetToolbarActions}
+        toolbarSearch={sheetToolbarSearch}
+        toolbarSummary={sheetToolbarSummary}
         loading={exportsLoading}
         loadingLabel={exportsData.length > 0 ? 'Refreshing exports…' : 'Loading exports…'}
       />
@@ -2695,120 +2869,6 @@ function App() {
       </section>
 
       <section className="sheet-panel panel">
-        <div className="sheet-head">
-          <div className="tab-strip">
-            <button type="button" className={previewTab === 'papers' ? 'tab-button active' : 'tab-button'} onClick={() => handlePreviewTabChange('papers')}>
-              Papers
-            </button>
-            <button type="button" className={previewTab === 'jobs' ? 'tab-button active' : 'tab-button'} onClick={() => handlePreviewTabChange('jobs')}>
-              Jobs
-            </button>
-            <button type="button" className={previewTab === 'exports' ? 'tab-button active' : 'tab-button'} onClick={() => handlePreviewTabChange('exports')}>
-              Exports
-            </button>
-          </div>
-
-          <div className="sheet-actions">
-            <label className="search-field">
-              <span className="field-label">Quick search</span>
-              <input
-                className="floating-placeholder-input"
-                value={tableSearch}
-                onChange={(event) => setTableSearch(event.target.value)}
-                placeholder={
-                  previewTab === 'papers'
-                    ? 'Search title, abstract, authors, repo...'
-                    : previewTab === 'jobs'
-                      ? 'Search job id, scope, summary...'
-                      : 'Search export name or scope...'
-                }
-              />
-            </label>
-
-            {previewTab === 'papers' ? (
-              <details ref={exportMenuRef} className="export-menu">
-                <summary className="primary-button export-menu-trigger">Export CSV</summary>
-                <div className="export-menu-panel">
-                  <div className="form-field">
-                    <span className="field-label">Export scope</span>
-                    <div className="segmented-control export-mode-control" role="tablist" aria-label="Export mode">
-                      <button
-                        type="button"
-                        className={exportMode === 'all_papers' ? 'segment-button active' : 'segment-button'}
-                        onClick={() => setExportMode('all_papers')}
-                      >
-                        Full export
-                      </button>
-                      <button
-                        type="button"
-                        className={exportMode === 'papers_view' ? 'segment-button active' : 'segment-button'}
-                        onClick={() => setExportMode('papers_view')}
-                      >
-                        Current view
-                      </button>
-                    </div>
-                    <span className="inline-note">
-                      {exportMode === 'all_papers'
-                        ? `Export all ${dashboard?.papers ?? papers.length} papers from the local database.`
-                        : `Export ${filteredPaperIds.length} visible papers in the current filter and sort order.`}
-                    </span>
-                  </div>
-
-                  <label className="form-field">
-                    <span className="field-label">Export name</span>
-                    <div className="input-with-suffix">
-                      <input
-                        className="floating-placeholder-input suffix-input"
-                        value={exportOutputName}
-                        onChange={(event) => setExportOutputName(normalizeExportBaseName(event.target.value))}
-                        placeholder="cv-weekly-2026-04-19"
-                      />
-                      <span className="input-suffix">.csv</span>
-                    </div>
-                  </label>
-
-                  <div className="export-menu-actions">
-                    <button
-                      type="button"
-                      className="primary-button"
-                      onClick={() => launchJob('export')}
-                      disabled={
-                        launchingJob !== null ||
-                        !exportNameValid ||
-                        (exportMode === 'papers_view' && !filteredPaperExportReady)
-                      }
-                    >
-                      {launchingJob === 'export' ? 'Running…' : 'Queue export'}
-                    </button>
-                    <button
-                      type="button"
-                      className="ghost-button"
-                      onClick={() => {
-                        handlePreviewTabChange('exports')
-                        setBannerAction(null)
-                      }}
-                    >
-                      View exports
-                    </button>
-                  </div>
-                </div>
-              </details>
-            ) : null}
-
-            <button
-              type="button"
-              className="ghost-button refresh-button"
-              onClick={() => {
-                setSummaryRefreshTick((value) => value + 1)
-                setJobsRefreshTick((value) => value + 1)
-                setTableRefreshTick((value) => value + 1)
-              }}
-            >
-              Refresh
-            </button>
-          </div>
-        </div>
-
         <div ref={sheetFrameRef} className="sheet-frame">
           {activeGrid}
         </div>

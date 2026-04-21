@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from 'react'
+import { useEffect, useMemo, useRef, useState, type ReactNode } from 'react'
 import { AgGridReact } from 'ag-grid-react'
 import {
   AllCommunityModule,
@@ -6,12 +6,17 @@ import {
   type ColDef,
   type GridApi,
   type GridReadyEvent,
+  type PostProcessPopupParams,
   type RowClickedEvent,
   type RowClassParams,
   type GridState,
 } from 'ag-grid-community'
 import 'ag-grid-community/styles/ag-grid.css'
 import 'ag-grid-community/styles/ag-theme-balham.css'
+import {
+  compactTextColumnFilter,
+  compactTextFilterParams,
+} from './CompactColumnFilter'
 import SheetHeader from './SheetHeader'
 import usePointerDownOutside from '../hooks/usePointerDownOutside'
 
@@ -39,7 +44,11 @@ type AgGridSheetProps<TData extends RowRecord = RowRecord> = {
   quickSearch: string
   persistenceId: string
   emptyMessage: string
-  toolbarSummary?: string
+  toolbarLeading?: ReactNode
+  toolbarActions?: ReactNode
+  toolbarSearch?: ReactNode
+  toolbarSummary?: ReactNode
+  toolbarAfterSummary?: ReactNode
   loading?: boolean
   loadingLabel?: string
   progressCurrent?: number
@@ -118,6 +127,118 @@ function clampFreezeCount(value: string | number, visibleColumnCount: number) {
   return Math.max(0, Math.min(visibleColumnCount, Math.trunc(numeric)))
 }
 
+const POPUP_VIEWPORT_GUTTER = 12
+const POPUP_MIN_HEIGHT = 180
+
+function clampPopupToViewport(popup: HTMLElement) {
+  if (typeof window === 'undefined') return
+
+  const maxHeight = Math.max(POPUP_MIN_HEIGHT, window.innerHeight - POPUP_VIEWPORT_GUTTER * 2)
+  popup.style.maxHeight = `${maxHeight}px`
+
+  const menu = popup.querySelector<HTMLElement>('.ag-menu')
+  if (menu) {
+    menu.style.maxHeight = `${maxHeight}px`
+  }
+
+  const rect = popup.getBoundingClientRect()
+  let nextLeft = rect.left + window.scrollX
+  let nextTop = rect.top + window.scrollY
+
+  if (rect.right > window.innerWidth - POPUP_VIEWPORT_GUTTER) {
+    nextLeft -= rect.right - (window.innerWidth - POPUP_VIEWPORT_GUTTER)
+  }
+
+  if (rect.left < POPUP_VIEWPORT_GUTTER) {
+    nextLeft += POPUP_VIEWPORT_GUTTER - rect.left
+  }
+
+  if (rect.bottom > window.innerHeight - POPUP_VIEWPORT_GUTTER) {
+    nextTop -= rect.bottom - (window.innerHeight - POPUP_VIEWPORT_GUTTER)
+  }
+
+  if (rect.top < POPUP_VIEWPORT_GUTTER) {
+    nextTop += POPUP_VIEWPORT_GUTTER - rect.top
+  }
+
+  nextLeft = Math.max(window.scrollX + POPUP_VIEWPORT_GUTTER, nextLeft)
+  nextTop = Math.max(window.scrollY + POPUP_VIEWPORT_GUTTER, nextTop)
+
+  popup.style.left = `${Math.round(nextLeft)}px`
+  popup.style.top = `${Math.round(nextTop)}px`
+}
+
+function bindPopupViewportHandling(popup: HTMLElement) {
+  if (typeof window === 'undefined') return
+  if (popup.dataset.ghstarsPopupViewportBound === 'true') return
+
+  popup.dataset.ghstarsPopupViewportBound = 'true'
+  popup.classList.add('ag-theme-balham', 'ghstars-grid-popup')
+
+  let frameId: number | null = null
+  const schedule = () => {
+    if (!popup.isConnected) return
+    if (frameId !== null) {
+      window.cancelAnimationFrame(frameId)
+    }
+    frameId = window.requestAnimationFrame(() => {
+      frameId = null
+      clampPopupToViewport(popup)
+    })
+  }
+
+  const handleWindowResize = () => schedule()
+  const handlePopupInput = () => schedule()
+
+  popup.addEventListener('input', handlePopupInput, true)
+  popup.addEventListener('change', handlePopupInput, true)
+  popup.addEventListener('keyup', handlePopupInput, true)
+  popup.addEventListener('click', handlePopupInput, true)
+  window.addEventListener('resize', handleWindowResize)
+
+  let resizeObserver: ResizeObserver | null = null
+  if ('ResizeObserver' in window) {
+    resizeObserver = new ResizeObserver(() => schedule())
+    resizeObserver.observe(popup)
+  }
+
+  const popupObserver = new MutationObserver(() => schedule())
+  popupObserver.observe(popup, {
+    childList: true,
+    subtree: true,
+  })
+
+  const parent = popup.parentElement
+  let mutationObserver: MutationObserver | null = null
+
+  const cleanup = () => {
+    if (frameId !== null) {
+      window.cancelAnimationFrame(frameId)
+      frameId = null
+    }
+    popup.removeEventListener('input', handlePopupInput, true)
+    popup.removeEventListener('change', handlePopupInput, true)
+    popup.removeEventListener('keyup', handlePopupInput, true)
+    popup.removeEventListener('click', handlePopupInput, true)
+    window.removeEventListener('resize', handleWindowResize)
+    resizeObserver?.disconnect()
+    popupObserver.disconnect()
+    mutationObserver?.disconnect()
+    delete popup.dataset.ghstarsPopupViewportBound
+  }
+
+  if (parent) {
+    mutationObserver = new MutationObserver(() => {
+      if (!popup.isConnected) {
+        cleanup()
+      }
+    })
+    mutationObserver.observe(parent, { childList: true })
+  }
+
+  schedule()
+}
+
 export default function AgGridSheet<TData extends RowRecord>({
   columns,
   rows,
@@ -128,7 +249,11 @@ export default function AgGridSheet<TData extends RowRecord>({
   quickSearch,
   persistenceId,
   emptyMessage,
+  toolbarLeading,
+  toolbarActions,
+  toolbarSearch,
   toolbarSummary,
+  toolbarAfterSummary,
   loading = false,
   loadingLabel = 'Loading rows…',
   progressCurrent,
@@ -145,6 +270,7 @@ export default function AgGridSheet<TData extends RowRecord>({
 
   const initialState = useMemo(() => loadGridState(persistenceId), [persistenceId])
   const columnIds = useMemo(() => new Set(columns.map((column) => columnIdOf(column)).filter(Boolean)), [columns])
+  const popupParent = typeof document === 'undefined' ? null : document.body
   const blockingLoad = loading && rows.length === 0
   const normalizedProgressCurrent = Math.max(0, progressCurrent ?? 0)
   const normalizedProgressTotal =
@@ -177,11 +303,8 @@ export default function AgGridSheet<TData extends RowRecord>({
     () => ({
       sortable: true,
       resizable: true,
-      filter: 'agTextColumnFilter',
-      filterParams: {
-        buttons: ['reset', 'cancel'],
-        closeOnApply: true,
-      },
+      filter: compactTextColumnFilter,
+      filterParams: compactTextFilterParams,
       headerComponent: SheetHeader,
       minWidth: 140,
     }),
@@ -311,9 +434,16 @@ export default function AgGridSheet<TData extends RowRecord>({
     syncDisplayedKeys(api)
   }
 
+  function handlePopupPostProcess(params: PostProcessPopupParams<TData>) {
+    if (!params.ePopup.querySelector('.ag-filter-body-wrapper, .ag-rich-select-list')) return
+    bindPopupViewportHandling(params.ePopup)
+  }
+
   return (
     <div className="sheet-grid-shell">
       <div className="sheet-grid-toolbar">
+        {toolbarLeading ? <div className="sheet-grid-toolbar-slot sheet-grid-toolbar-leading">{toolbarLeading}</div> : null}
+
         <div className="sheet-grid-toolbar-group">
           <details ref={columnMenuRef} className="column-picker">
             <summary>Columns</summary>
@@ -378,29 +508,33 @@ export default function AgGridSheet<TData extends RowRecord>({
               </form>
             </div>
           </details>
-
-          <div className="sheet-grid-status-slot" role="status" aria-live="polite">
-            {loading ? (
-              <>
-                <span className="sheet-grid-status-label">{loadingSummary}</span>
-                <div className="sheet-loading-meter toolbar" aria-hidden="true">
-                  <span
-                    className={determinateProgress === undefined ? 'sheet-loading-meter-bar indeterminate' : 'sheet-loading-meter-bar'}
-                    style={determinateProgress === undefined ? undefined : { width: `${determinateProgress}%` }}
-                  />
-                </div>
-              </>
-            ) : null}
-          </div>
         </div>
 
-        <div className="sheet-grid-toolbar-actions">
-          {toolbarSummary ? <span className="sheet-grid-toolbar-summary">{toolbarSummary}</span> : null}
-
-          <button type="button" className="ghost-button" onClick={resetView}>
+        <div className="sheet-grid-toolbar-slot sheet-grid-toolbar-reset-slot">
+          <button type="button" className="ghost-button sheet-reset-button" onClick={resetView}>
             Reset view
           </button>
         </div>
+
+        {toolbarActions ? <div className="sheet-grid-toolbar-slot sheet-grid-toolbar-actions">{toolbarActions}</div> : null}
+
+        {toolbarSearch ? <div className="sheet-grid-toolbar-slot sheet-grid-toolbar-search">{toolbarSearch}</div> : null}
+
+        {loading ? (
+          <div className="sheet-grid-status-slot" role="status" aria-live="polite">
+            <span className="sheet-grid-status-label">{loadingSummary}</span>
+            <div className="sheet-loading-meter toolbar" aria-hidden="true">
+              <span
+                className={determinateProgress === undefined ? 'sheet-loading-meter-bar indeterminate' : 'sheet-loading-meter-bar'}
+                style={determinateProgress === undefined ? undefined : { width: `${determinateProgress}%` }}
+              />
+            </div>
+          </div>
+        ) : null}
+
+        {toolbarSummary ? <div className="sheet-grid-toolbar-slot sheet-grid-toolbar-summary">{toolbarSummary}</div> : null}
+
+        {toolbarAfterSummary ? <div className="sheet-grid-toolbar-slot sheet-grid-toolbar-export-slot">{toolbarAfterSummary}</div> : null}
       </div>
 
       <div className={blockingLoad ? 'ag-theme-balham sheet-grid-host loading' : 'ag-theme-balham sheet-grid-host'}>
@@ -421,6 +555,9 @@ export default function AgGridSheet<TData extends RowRecord>({
           columnDefs={columns}
           defaultColDef={defaultColDef}
           initialState={initialState}
+          enableFilterHandlers
+          popupParent={popupParent}
+          postProcessPopup={handlePopupPostProcess}
           suppressMultiSort
           quickFilterText={quickSearch.trim()}
           getRowId={(params) => String(params.data[rowKey] ?? '')}
