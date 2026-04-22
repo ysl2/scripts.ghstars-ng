@@ -6,7 +6,7 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, Field, field_validator, model_validator
 
-from papertorepo.db.models import JobStatus, JobType, RepoStableStatus
+from papertorepo.db.models import JobAttemptMode, JobStatus, JobType, RepoStableStatus
 
 
 MONTH_PATTERN = re.compile(r"^\d{4}-(0[1-9]|1[0-2])$")
@@ -154,6 +154,8 @@ class JobRead(BaseModel):
     parent_job_id: str | None
     job_type: JobType
     status: JobStatus
+    attempt_mode: JobAttemptMode
+    attempt_series_key: str
     scope_json: dict[str, Any]
     dedupe_key: str
     stats_json: dict[str, Any]
@@ -172,6 +174,11 @@ class JobRead(BaseModel):
     attempt_rank: int = 1
 
     model_config = {"from_attributes": True}
+
+
+class JobLaunchRead(BaseModel):
+    disposition: Literal["created"]
+    job: JobRead
 
 
 class JobQueueSummaryRead(BaseModel):

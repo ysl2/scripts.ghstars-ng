@@ -8,7 +8,9 @@ from fastapi.testclient import TestClient
 from papertorepo.api.app import app, create_app
 from papertorepo.core.config import clear_settings_cache
 from papertorepo.db.session import session_scope
-from papertorepo.db.models import Paper, PaperRepoState, RepoStableStatus, utc_now
+from papertorepo.db.models import Job, JobAttemptMode, JobStatus, Paper, PaperRepoState, RepoStableStatus, utc_now
+from papertorepo.jobs.queue import claim_next_job, create_sync_arxiv_job, process_job
+from papertorepo.api.schemas import ScopePayload
 
 
 def test_public_papers_returns_summary_rows(db_env):
@@ -223,3 +225,105 @@ def test_public_scope_endpoints_return_422_for_invalid_categories_query(db_env, 
 
     assert response.status_code == 422
     assert response.json()["detail"] == "Enter categories as comma-separated arXiv fields, e.g. cs.CV, cs.LG."
+
+
+def test_sync_launch_endpoint_blocks_identical_active_scope(db_env):
+    payload = {
+        "categories": ["cs.CV"],
+        "month": "2026-04",
+    }
+
+    with TestClient(app) as client:
+        first = client.post("/api/v1/jobs/sync-arxiv", json=payload)
+        second = client.post("/api/v1/jobs/sync-arxiv", json=payload)
+
+    assert first.status_code == 200
+    assert second.status_code == 409
+    first_payload = first.json()
+
+    assert first_payload["disposition"] == "created"
+    assert first_payload["job"]["attempt_mode"] == JobAttemptMode.fresh.value
+    assert "already active" in second.json()["detail"]
+
+    with session_scope() as db:
+        jobs = list(db.query(Job).all())
+
+    assert len(jobs) == 1
+
+
+@pytest.mark.anyio
+async def test_sync_launch_endpoint_creates_fresh_batch_after_previous_success_without_reuse(db_env):
+    scope = ScopePayload(
+        categories=["cs.CV"],
+        **{"from": date(2025, 3, 15), "to": date(2025, 4, 10)},
+    )
+
+    with session_scope() as db:
+        first_batch = create_sync_arxiv_job(db, scope)
+
+    with session_scope() as db:
+        claimed = claim_next_job(db, "worker:test")
+    assert claimed is not None
+    await process_job(first_batch.id)
+
+    with session_scope() as db:
+        first_children = list(db.query(Job).filter(Job.parent_job_id == first_batch.id).all())
+        for child in first_children:
+            child.status = JobStatus.succeeded
+            child.finished_at = utc_now()
+            db.add(child)
+
+    payload = {
+        "categories": ["cs.CV"],
+        "from": "2025-03-15",
+        "to": "2025-04-10",
+    }
+    with TestClient(app) as client:
+        response = client.post("/api/v1/jobs/sync-arxiv", json=payload)
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["disposition"] == "created"
+    assert body["job"]["attempt_mode"] == JobAttemptMode.fresh.value
+    assert body["job"]["id"] != first_batch.id
+
+    second_batch_id = body["job"]["id"]
+
+    with session_scope() as db:
+        claimed = claim_next_job(db, "worker:test")
+    assert claimed is not None
+    assert claimed.id == second_batch_id
+    await process_job(second_batch_id)
+
+    with session_scope() as db:
+        second_children = list(db.query(Job).filter(Job.parent_job_id == second_batch_id).all())
+
+    assert len(second_children) == 2
+    assert all(child.status == JobStatus.pending for child in second_children)
+    assert all(child.attempt_mode == JobAttemptMode.fresh for child in second_children)
+    assert all(child.stats_json.get("reused") is not True for child in second_children)
+
+
+def test_same_scope_fresh_runs_remain_independent_in_attempt_history(db_env):
+    with session_scope() as db:
+        first = create_sync_arxiv_job(db, ScopePayload(categories=["cs.CV"], month="2026-04"))
+        second = create_sync_arxiv_job(db, ScopePayload(categories=["cs.CV"], month="2026-04"))
+        first.status = JobStatus.succeeded
+        first.finished_at = utc_now()
+        second.status = JobStatus.succeeded
+        second.finished_at = utc_now()
+        db.add_all([first, second])
+
+    with TestClient(app) as client:
+        first_attempts = client.get(f"/api/v1/jobs/{first.id}/attempts?limit=10")
+        second_attempts = client.get(f"/api/v1/jobs/{second.id}/attempts?limit=10")
+        latest_jobs = client.get("/api/v1/jobs?view=latest&root_only=true&limit=20")
+
+    assert first_attempts.status_code == 200
+    assert second_attempts.status_code == 200
+    assert [row["id"] for row in first_attempts.json()] == [first.id]
+    assert [row["id"] for row in second_attempts.json()] == [second.id]
+
+    latest_ids = [row["id"] for row in latest_jobs.json()]
+    assert first.id in latest_ids
+    assert second.id in latest_ids

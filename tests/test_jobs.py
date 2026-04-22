@@ -6,9 +6,9 @@ import pytest
 
 from papertorepo.core.config import clear_settings_cache
 from papertorepo.db.session import configure_database, session_scope
-from papertorepo.jobs.queue import create_job, init_database, list_jobs_read, process_job, serialize_job, stop_job
+from papertorepo.jobs.queue import create_job, get_job_attempt_meta, init_database, list_jobs_read, process_job, rerun_job, serialize_job, stop_job
 from papertorepo.jobs.stop import request_job_stop
-from papertorepo.db.models import Job, JobStatus, JobType, utc_now
+from papertorepo.db.models import Job, JobAttemptMode, JobStatus, JobType, utc_now
 from papertorepo.api.schemas import ScopePayload
 from papertorepo.services.pipeline import get_dashboard_stats, get_job_queue_snapshot
 
@@ -34,6 +34,91 @@ def test_stop_pending_job_marks_it_cancelled(job_env):
         assert stopped.stop_requested_at is not None
         assert stopped.finished_at is not None
         assert stopped.error_text == "Stopped by user."
+
+
+def test_create_job_defaults_attempt_mode_to_fresh(job_env):
+    with session_scope() as db:
+        job = create_job(db, JobType.export, ScopePayload(output_name="papers.csv"))
+
+    assert job.attempt_mode == JobAttemptMode.fresh
+
+
+def test_rerun_job_creates_repair_attempt(job_env):
+    with session_scope() as db:
+        job = create_job(db, JobType.sync_links, ScopePayload(categories=["cs.CV"], day=date(2026, 4, 21)))
+        job.status = JobStatus.succeeded
+        job.finished_at = utc_now()
+        db.add(job)
+
+    with session_scope() as db:
+        rerun = rerun_job(db, job.id)
+
+    assert rerun.id != job.id
+    assert rerun.attempt_mode == JobAttemptMode.repair
+    assert rerun.status == JobStatus.pending
+
+
+def test_same_scope_fresh_runs_do_not_share_attempt_series(job_env):
+    with session_scope() as db:
+        first = create_job(db, JobType.sync_links, ScopePayload(categories=["cs.CV"], day=date(2026, 4, 21)))
+        second = create_job(db, JobType.sync_links, ScopePayload(categories=["cs.CV"], day=date(2026, 4, 21)))
+
+    assert first.attempt_series_key != second.attempt_series_key
+
+    with session_scope() as db:
+        first_meta = get_job_attempt_meta(db, db.get(Job, first.id))
+        second_meta = get_job_attempt_meta(db, db.get(Job, second.id))
+
+    assert first_meta.attempt_count == 1
+    assert second_meta.attempt_count == 1
+
+
+def test_rerun_attaches_to_clicked_fresh_series_not_newer_same_scope_fresh(job_env):
+    with session_scope() as db:
+        first = create_job(db, JobType.sync_links, ScopePayload(categories=["cs.CV"], day=date(2026, 4, 21)))
+        second = create_job(db, JobType.sync_links, ScopePayload(categories=["cs.CV"], day=date(2026, 4, 21)))
+        first.status = JobStatus.succeeded
+        first.finished_at = utc_now()
+        second.status = JobStatus.succeeded
+        second.finished_at = utc_now()
+        db.add_all([first, second])
+
+    with session_scope() as db:
+        rerun = rerun_job(db, first.id)
+
+    assert rerun.attempt_series_key == first.attempt_series_key
+    assert rerun.attempt_series_key != second.attempt_series_key
+    assert rerun.attempt_mode == JobAttemptMode.repair
+
+    with session_scope() as db:
+        first_meta = get_job_attempt_meta(db, db.get(Job, first.id))
+        second_meta = get_job_attempt_meta(db, db.get(Job, second.id))
+        rerun_meta = get_job_attempt_meta(db, db.get(Job, rerun.id))
+
+    assert first_meta.attempt_count == 2
+    assert first_meta.attempt_rank == 2
+    assert rerun_meta.attempt_count == 2
+    assert rerun_meta.attempt_rank == 1
+    assert second_meta.attempt_count == 1
+    assert second_meta.attempt_rank == 1
+
+
+def test_only_latest_repair_chain_node_can_rerun(job_env):
+    with session_scope() as db:
+        root = create_job(db, JobType.sync_links, ScopePayload(categories=["cs.CV"], day=date(2026, 4, 21)))
+        root.status = JobStatus.succeeded
+        root.finished_at = utc_now()
+        db.add(root)
+
+    with session_scope() as db:
+        rerun = rerun_job(db, root.id)
+        rerun.status = JobStatus.succeeded
+        rerun.finished_at = utc_now()
+        db.add(rerun)
+
+    with session_scope() as db:
+        with pytest.raises(RuntimeError, match="Only the latest run in this repair chain can be re-run"):
+            rerun_job(db, root.id)
 
 
 @pytest.mark.anyio

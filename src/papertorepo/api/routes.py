@@ -15,9 +15,8 @@ from papertorepo.db.session import get_db
 from papertorepo.jobs.ordering import job_display_order_by
 from papertorepo.jobs.queue import (
     create_job,
-    create_sync_job,
-    create_sync_arxiv_job,
     get_job_attempt_meta,
+    launch_sync_job,
     list_job_attempts_read,
     list_jobs_read,
     rerun_job,
@@ -30,6 +29,7 @@ from papertorepo.api.schemas import (
     DashboardStats,
     ExportRead,
     HealthRead,
+    JobLaunchRead,
     JobQueueSummaryRead,
     JobRead,
     PaperRead,
@@ -105,16 +105,15 @@ def _enqueue_job(db: Session, job_type: JobType, scope: ScopePayload) -> JobRead
         raise _scope_http_exception(exc) from exc
 
 
-def _enqueue_sync_job(db: Session, job_type: JobType, scope: ScopePayload) -> JobRead:
+def _launch_sync_job(db: Session, job_type: JobType, scope: ScopePayload) -> JobLaunchRead:
     try:
-        return serialize_job(db, create_sync_job(db, job_type, scope))
-    except (ValueError, ValidationError) as exc:
-        raise _scope_http_exception(exc) from exc
-
-
-def _enqueue_sync_arxiv_job(db: Session, scope: ScopePayload) -> JobRead:
-    try:
-        return serialize_job(db, create_sync_arxiv_job(db, scope))
+        job = launch_sync_job(db, job_type, scope)
+        return JobLaunchRead(
+            disposition="created",
+            job=serialize_job(db, job),
+        )
+    except RuntimeError as exc:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
     except (ValueError, ValidationError) as exc:
         raise _scope_http_exception(exc) from exc
 
@@ -328,17 +327,17 @@ def register_routes(app: FastAPI) -> None:
         except LookupError as exc:
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
 
-    @router.post("/jobs/sync-arxiv", response_model=JobRead)
-    def enqueue_sync_arxiv(scope: ScopePayload, db: Session = Depends(get_db)) -> JobRead:
-        return _enqueue_sync_arxiv_job(db, scope)
+    @router.post("/jobs/sync-arxiv", response_model=JobLaunchRead)
+    def enqueue_sync_arxiv(scope: ScopePayload, db: Session = Depends(get_db)) -> JobLaunchRead:
+        return _launch_sync_job(db, JobType.sync_arxiv, scope)
 
-    @router.post("/jobs/sync-links", response_model=JobRead)
-    def enqueue_sync_links(scope: ScopePayload, db: Session = Depends(get_db)) -> JobRead:
-        return _enqueue_sync_job(db, JobType.sync_links, scope)
+    @router.post("/jobs/sync-links", response_model=JobLaunchRead)
+    def enqueue_sync_links(scope: ScopePayload, db: Session = Depends(get_db)) -> JobLaunchRead:
+        return _launch_sync_job(db, JobType.sync_links, scope)
 
-    @router.post("/jobs/enrich", response_model=JobRead)
-    def enqueue_enrich(scope: ScopePayload, db: Session = Depends(get_db)) -> JobRead:
-        return _enqueue_sync_job(db, JobType.enrich, scope)
+    @router.post("/jobs/enrich", response_model=JobLaunchRead)
+    def enqueue_enrich(scope: ScopePayload, db: Session = Depends(get_db)) -> JobLaunchRead:
+        return _launch_sync_job(db, JobType.enrich, scope)
 
     @router.post("/jobs/export", response_model=JobRead)
     def enqueue_export(scope: ScopePayload, db: Session = Depends(get_db)) -> JobRead:

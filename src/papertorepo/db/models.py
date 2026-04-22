@@ -33,6 +33,11 @@ class JobStatus(str, enum.Enum):
     cancelled = "cancelled"
 
 
+class JobAttemptMode(str, enum.Enum):
+    fresh = "fresh"
+    repair = "repair"
+
+
 class ObservationStatus(str, enum.Enum):
     found = "found"
     checked_no_match = "checked_no_match"
@@ -51,6 +56,7 @@ class Job(Base):
     __table_args__ = (
         Index("ix_jobs_status_created_at", "status", "created_at"),
         Index("ix_jobs_dedupe_key_status", "dedupe_key", "status"),
+        Index("ix_jobs_attempt_series_key", "attempt_series_key"),
         Index("ix_jobs_locked_at", "locked_at"),
         Index("ix_jobs_parent_created_at", "parent_job_id", "created_at"),
     )
@@ -59,6 +65,8 @@ class Job(Base):
     parent_job_id: Mapped[str | None] = mapped_column(ForeignKey("jobs.id", ondelete="SET NULL"), nullable=True, index=True)
     job_type: Mapped[JobType] = mapped_column(Enum(JobType))
     status: Mapped[JobStatus] = mapped_column(Enum(JobStatus), default=JobStatus.pending)
+    attempt_mode: Mapped[JobAttemptMode] = mapped_column(Enum(JobAttemptMode), default=JobAttemptMode.fresh)
+    attempt_series_key: Mapped[str] = mapped_column(String(36))
     scope_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
     dedupe_key: Mapped[str] = mapped_column(String(500), index=True)
     stats_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)

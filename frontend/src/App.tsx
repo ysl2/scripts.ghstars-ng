@@ -24,6 +24,7 @@ import './App.css'
 
 type JobStatus = 'pending' | 'running' | 'succeeded' | 'failed' | 'cancelled'
 type BatchState = 'queued' | 'running' | 'stopping' | 'succeeded' | 'failed' | 'cancelled'
+type JobAttemptMode = 'fresh' | 'repair'
 type LinkStatus = 'found' | 'not_found' | 'ambiguous' | 'unknown'
 type PreviewTab = 'papers' | 'jobs' | 'exports'
 type TimeMode = 'day' | 'month' | 'range'
@@ -46,6 +47,8 @@ type Job = {
   parent_job_id: string | null
   job_type: string
   status: JobStatus
+  attempt_mode: JobAttemptMode
+  attempt_series_key: string
   scope_json: Record<string, unknown>
   dedupe_key: string
   stats_json: Record<string, unknown>
@@ -62,6 +65,16 @@ type Job = {
   child_summary: ChildSummary | null
   attempt_count: number
   attempt_rank: number
+}
+
+type JobLaunch = {
+  disposition: 'created'
+  job: Job
+}
+
+type LaunchFeedback = {
+  stepJob: StepJob
+  job: Job | null
 }
 
 type ChildSummary = {
@@ -581,7 +594,7 @@ function isReusedChildStats(stats: Record<string, unknown>) {
 
 function reusedChildSummary(stats: Record<string, unknown>) {
   if (!isReusedChildStats(stats)) return null
-  return `Reused success · ${shortId(String(stats.reused_from_job_id))}`
+  return `Reused from previous success · ${shortId(String(stats.reused_from_job_id))}`
 }
 
 function parseJobTime(value: string) {
@@ -622,8 +635,18 @@ function shortId(value: string) {
   return value.slice(0, 8)
 }
 
-function attemptGroupKey(job: Pick<Job, 'parent_job_id' | 'dedupe_key'>) {
-  return `${job.parent_job_id ?? 'root'}:${job.dedupe_key}`
+function attemptModeLabel(attemptMode: JobAttemptMode) {
+  return attemptMode === 'repair' ? 'Repair rerun' : 'Fresh run'
+}
+
+function attemptGroupKey(job: Pick<Job, 'attempt_series_key'>) {
+  return job.attempt_series_key
+}
+
+function rerunCountLabel(attemptCount: number) {
+  const reruns = Math.max(0, attemptCount - 1)
+  if (reruns <= 0) return 'Fresh run'
+  return reruns === 1 ? '1 rerun' : `${formatInteger(reruns)} reruns`
 }
 
 function isLatestAttempt(job: Pick<Job, 'attempt_rank'>) {
@@ -693,16 +716,30 @@ function childSummaryLabel(summary: ChildSummary | null) {
   return parts.join(' · ')
 }
 
+function batchAttemptSummary(job: Job) {
+  const reused = numericStat(job.stats_json, 'children_reused_success') ?? 0
+  const enqueued = numericStat(job.stats_json, 'children_enqueued') ?? 0
+  const existing = numericStat(job.stats_json, 'children_existing') ?? 0
+  const parts: string[] = []
+  if (reused > 0) parts.push(`${formatInteger(reused)} reused`)
+  if (enqueued > 0) parts.push(`${formatInteger(enqueued)} queued`)
+  if (existing > 0) parts.push(`${formatInteger(existing)} existing`)
+  return parts.join(' · ')
+}
+
 function jobSummary(job: Job) {
   const displayStatus = jobDisplayStatus(job)
   if (job.error_text && displayStatus !== 'stopping') return job.error_text
   const reusedSummary = reusedChildSummary(job.stats_json)
   if (reusedSummary) return reusedSummary
   if (isBatchRootType(job.job_type)) {
-    if (job.batch_state === 'queued') return `Queued · ${childSummaryLabel(job.child_summary)}`
-    if (job.batch_state === 'stopping') return `Stopping · ${childSummaryLabel(job.child_summary)}`
-    if (job.batch_state === 'cancelled') return job.error_text || `Stopped · ${childSummaryLabel(job.child_summary)}`
-    return childSummaryLabel(job.child_summary)
+    const batchAttempt = batchAttemptSummary(job)
+    const childSummary = childSummaryLabel(job.child_summary)
+    const combinedSummary = [batchAttempt, childSummary].filter((item) => item && item !== '—').join(' · ') || '—'
+    if (job.batch_state === 'queued') return `Queued · ${combinedSummary}`
+    if (job.batch_state === 'stopping') return `Stopping · ${combinedSummary}`
+    if (job.batch_state === 'cancelled') return job.error_text || `Stopped · ${combinedSummary}`
+    return combinedSummary
   }
   if (displayStatus === 'pending') return 'Queued'
   if (displayStatus === 'stopping') {
@@ -763,7 +800,9 @@ function queueJobProgressLabel(job: Job) {
     case 'sync_arxiv_batch':
     case 'sync_links_batch':
     case 'enrich_batch':
-      return childSummaryLabel(job.child_summary)
+      return [batchAttemptSummary(job), childSummaryLabel(job.child_summary)]
+        .filter((item) => item && item !== '—')
+        .join(' · ') || 'Batch prepared'
     case 'sync_arxiv': {
       const papersSaved = numericStat(job.stats_json, 'papers_upserted')
       const listingPages = numericStat(job.stats_json, 'listing_pages_fetched')
@@ -1033,17 +1072,17 @@ function ForceChip({
 function QueueSummaryCard({
   summary,
   launchingJob,
-  handoffJob,
+  launchFeedback,
 }: {
   summary: JobQueueSummary | null
   launchingJob: StepJob | null
-  handoffJob: StepJob | null
+  launchFeedback: LaunchFeedback | null
 }) {
   const showSubmittingState = launchingJob !== null && (!summary || summary.state === 'idle')
-  const showHandoffState = !showSubmittingState && handoffJob !== null && (!summary || summary.state === 'idle')
-  const currentJob = showSubmittingState || showHandoffState ? null : summary?.current_job ?? null
-  const nextJob = showSubmittingState || showHandoffState ? null : summary?.next_job ?? null
-  const counts = showSubmittingState || showHandoffState
+  const showCreatedHandoffState = !showSubmittingState && launchFeedback !== null && (!summary || summary.state === 'idle')
+  const currentJob = showSubmittingState || showCreatedHandoffState ? null : summary?.current_job ?? null
+  const nextJob = showSubmittingState || showCreatedHandoffState ? null : summary?.next_job ?? null
+  const counts = showSubmittingState || showCreatedHandoffState
     ? { running: 0, stopping: 0, pending: 1 }
     : {
         running: summary?.running ?? 0,
@@ -1060,10 +1099,10 @@ function QueueSummaryCard({
     toneClassName = 'waiting'
     stateLabel = 'Submitting'
     primary = `Queuing ${stepJobLabel(launchingJob)}…`
-  } else if (showHandoffState && handoffJob !== null) {
+  } else if (showCreatedHandoffState && launchFeedback !== null) {
     toneClassName = 'waiting'
     stateLabel = 'Queued'
-    primary = `Starting ${stepJobLabel(handoffJob)}…`
+    primary = `Starting ${stepJobLabel(launchFeedback.stepJob)}…`
     segments.push('Refreshing queue status')
   } else if (!summary) {
     toneClassName = 'loading'
@@ -1379,7 +1418,7 @@ function App() {
   const [selectedExportId, setSelectedExportId] = useState<string | null>(null)
   const [visibleKeys, setVisibleKeys] = useState<string[]>([])
   const [launchingJob, setLaunchingJob] = useState<StepJob | null>(null)
-  const [queueHandoffJob, setQueueHandoffJob] = useState<StepJob | null>(null)
+  const [launchFeedback, setLaunchFeedback] = useState<LaunchFeedback | null>(null)
   const [rerunningJobId, setRerunningJobId] = useState<string | null>(null)
   const [stoppingJobIds, setStoppingJobIds] = useState<string[]>([])
   const [error, setError] = useState<string | null>(null)
@@ -2014,16 +2053,28 @@ function App() {
 
     try {
       setLaunchingJob(jobType)
-      await fetchJson<Job>(`/api/v1/jobs/${jobType}`, {
-        method: 'POST',
-        body: JSON.stringify(payload),
-      })
+      const response =
+        jobType === 'export'
+          ? {
+              disposition: 'created' as const,
+              job: await fetchJson<Job>(`/api/v1/jobs/${jobType}`, {
+                method: 'POST',
+                body: JSON.stringify(payload),
+              }),
+            }
+          : await fetchJson<JobLaunch>(`/api/v1/jobs/${jobType}`, {
+              method: 'POST',
+              body: JSON.stringify(payload),
+            })
       if (queueHandoffTimeoutRef.current !== null) {
         window.clearTimeout(queueHandoffTimeoutRef.current)
       }
-      setQueueHandoffJob(jobType)
+      setLaunchFeedback({
+        stepJob: jobType,
+        job: response.job,
+      })
       queueHandoffTimeoutRef.current = window.setTimeout(() => {
-        setQueueHandoffJob(null)
+        setLaunchFeedback(null)
         queueHandoffTimeoutRef.current = null
       }, 3000)
       setSummaryRefreshTick((value) => value + 1)
@@ -2039,7 +2090,7 @@ function App() {
         window.clearTimeout(queueHandoffTimeoutRef.current)
         queueHandoffTimeoutRef.current = null
       }
-      setQueueHandoffJob(null)
+      setLaunchFeedback(null)
       if (err instanceof Error) setError(err.message)
     } finally {
       setLaunchingJob(null)
@@ -2149,12 +2200,12 @@ function App() {
         const isHistoryRow = rowKind === 'history'
         const isBatchFolder = !isHistoryRow && rowKind === 'root' && isBatchFolderJob(job)
         const historyLabel = isHistoryRow
-          ? `History #${job.attempt_rank}`
+          ? 'Earlier run'
           : isBatchFolder
             ? 'Batch folder'
             : job.attempt_count > 1
-              ? `${job.attempt_count} attempts`
-              : 'Latest'
+              ? rerunCountLabel(job.attempt_count)
+              : attemptModeLabel(job.attempt_mode)
         const historySummary =
           latestAttempt.id !== job.id
             ? [jobSummary(job), `superseded by ${shortId(latestAttempt.id)}`]
@@ -2189,6 +2240,7 @@ function App() {
           search_blob: [
             job.id,
             job.job_type,
+            attemptModeLabel(job.attempt_mode),
             isBatchFolder ? 'batch folder' : jobTypeLabel(job.job_type),
             scopeJsonLabel(job.scope_json),
             jobDisplayStatus(job),
@@ -2867,6 +2919,7 @@ function App() {
       const selectedJobIsBatchFolder = isBatchFolderJob(selectedJob)
       const selectedJobIsHistorical = !isLatestAttempt(selectedJob)
       const selectedJobAttemptList = selectedJobAttempts.length > 0 ? selectedJobAttempts : [selectedJob]
+      const selectedJobRerunCount = Math.max(0, selectedJob.attempt_count - 1)
 
       return (
         <div className="drawer-content">
@@ -2913,8 +2966,12 @@ function App() {
 
           <div className="drawer-tags">
             <StatusTag value={jobDisplayStatus(selectedJob)} />
-            <span className="meta-chip">{selectedJobIsHistorical ? 'Historical attempt' : selectedJobIsBatchFolder ? 'Batch folder' : 'Latest attempt'}</span>
-            <span className="meta-chip">{selectedJobIsBatchFolder ? `${selectedJob.attempt_count} total batch runs` : `${selectedJob.attempt_count} total attempts`}</span>
+            <span className="meta-chip">{selectedJobIsHistorical ? 'Earlier run in chain' : selectedJobIsBatchFolder ? 'Batch folder' : attemptModeLabel(selectedJob.attempt_mode)}</span>
+            {selectedJob.attempt_count > 1 ? (
+              <span className="meta-chip">
+                {selectedJobRerunCount === 1 ? '1 rerun in chain' : `${formatInteger(selectedJobRerunCount)} reruns in chain`}
+              </span>
+            ) : null}
             <span className="meta-chip">worker attempts {selectedJob.attempts}</span>
             <span className="meta-chip">{formatTime(selectedJob.created_at)}</span>
             {selectedJobDetailLoading ? <span className="meta-chip">Refreshing…</span> : null}
@@ -2922,6 +2979,7 @@ function App() {
 
           <DetailBlock label="Job id" value={<span className="mono-cell">{selectedJob.id}</span>} />
           {selectedJob.parent_job_id ? <DetailBlock label="Parent job" value={<span className="mono-cell">{selectedJob.parent_job_id}</span>} /> : null}
+          <DetailBlock label="Attempt mode" value={attemptModeLabel(selectedJob.attempt_mode)} />
           {selectedJobIsHistorical && selectedJobLatestAttempt && selectedJobLatestAttempt.id !== selectedJob.id ? (
             <DetailBlock
               label="Superseded by"
@@ -2939,10 +2997,10 @@ function App() {
           <DetailBlock label="Finished at" value={formatTime(selectedJob.finished_at)} />
           {selectedJob.attempt_count > 1 ? (
             <DetailBlock
-              label={selectedJobIsBatchFolder ? 'Batch run history' : 'Attempt history'}
+              label={selectedJobIsBatchFolder ? 'Batch run history' : 'Run history'}
               value={
                 selectedJobAttemptsLoading ? (
-                  <p className="long-text">{selectedJobIsBatchFolder ? 'Loading batch runs…' : 'Loading attempts…'}</p>
+                  <p className="long-text">{selectedJobIsBatchFolder ? 'Loading batch runs…' : 'Loading run history…'}</p>
                 ) : (
                   <div className="linked-list">
                     {selectedJobAttemptList.map((attempt) => (
@@ -2955,7 +3013,7 @@ function App() {
                         <span className="attempt-history-title">
                           <StatusTag value={jobDisplayStatus(attempt)} />
                           <span className="meta-chip">
-                            {attempt.attempt_rank === 1 ? (selectedJobIsBatchFolder ? 'Latest batch run' : 'Latest') : `History #${attempt.attempt_rank}`}
+                            {attempt.attempt_rank === 1 ? (selectedJobIsBatchFolder ? 'Latest batch run' : 'Latest run') : 'Earlier run'}
                           </span>
                         </span>
                         <span className="row-meta">
@@ -3441,7 +3499,7 @@ function App() {
           <QueueSummaryCard
             summary={dashboard?.job_queue_summary ?? null}
             launchingJob={launchingJob}
-            handoffJob={queueHandoffJob}
+            launchFeedback={launchFeedback}
           />
           {error ? <div className="error-box">{error}</div> : null}
         </div>

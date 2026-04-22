@@ -19,6 +19,10 @@ class ScopeWindow:
         return self.start_date is not None or self.end_date is not None
 
 
+def is_full_month_window(start_date: date, end_date: date) -> bool:
+    return start_date == month_start(start_date) and end_date == (_next_month_start(month_start(start_date)) - timedelta(days=1))
+
+
 def resolve_categories(scope: ScopePayload) -> list[str]:
     if scope.categories:
         return sorted({item.strip() for item in scope.categories if item.strip()})
@@ -147,8 +151,7 @@ def expand_month_priority_child_scope_jsons(scope_json: dict[str, object]) -> li
         end_date = month_window.end_date
         if start_date is None or end_date is None:
             continue
-        is_full_month = start_date == month_start(start_date) and end_date == (_next_month_start(month_start(start_date)) - timedelta(days=1))
-        if is_full_month:
+        if is_full_month_window(start_date, end_date):
             child_scopes.append(
                 build_scope_json(
                     ScopePayload(
@@ -171,21 +174,62 @@ def expand_month_priority_child_scope_jsons(scope_json: dict[str, object]) -> li
     return child_scopes
 
 
-def build_scope_json(scope: ScopePayload) -> dict[str, object]:
+def canonicalize_scope_payload(scope: ScopePayload) -> ScopePayload:
     categories = resolve_categories(scope)
-    window = resolve_window(scope)
     paper_ids = normalize_paper_ids(scope)
+    window = resolve_window(scope)
+
+    day = scope.day
+    month = scope.month
+    from_date = scope.from_date
+    to_date = scope.to_date
+
+    if window.start_date is not None and window.end_date is not None:
+        if window.start_date == window.end_date:
+            day = window.start_date
+            month = None
+            from_date = None
+            to_date = None
+        elif is_full_month_window(window.start_date, window.end_date):
+            day = None
+            month = month_label(window.start_date)
+            from_date = None
+            to_date = None
+        elif scope.day is None and scope.month is None:
+            day = None
+            month = None
+            from_date = window.start_date
+            to_date = window.end_date
+
+    return ScopePayload(
+        categories=categories,
+        day=day,
+        month=month,
+        **{"from": from_date, "to": to_date},
+        max_results=scope.max_results,
+        force=scope.force,
+        export_mode=scope.export_mode,
+        paper_ids=paper_ids,
+        output_name=scope.output_name,
+    )
+
+
+def build_scope_json(scope: ScopePayload) -> dict[str, object]:
+    canonical_scope = canonicalize_scope_payload(scope)
+    categories = resolve_categories(canonical_scope)
+    window = resolve_window(canonical_scope)
+    paper_ids = normalize_paper_ids(canonical_scope)
     return {
         "categories": categories,
-        "day": scope.day.isoformat() if scope.day else None,
-        "month": scope.month,
-        "from": None if scope.day or scope.month else window.start_date.isoformat() if window.start_date else None,
-        "to": None if scope.day or scope.month else window.end_date.isoformat() if window.end_date else None,
-        "max_results": scope.max_results,
-        "force": scope.force,
-        "export_mode": scope.export_mode,
+        "day": canonical_scope.day.isoformat() if canonical_scope.day else None,
+        "month": canonical_scope.month,
+        "from": None if canonical_scope.day or canonical_scope.month else window.start_date.isoformat() if window.start_date else None,
+        "to": None if canonical_scope.day or canonical_scope.month else window.end_date.isoformat() if window.end_date else None,
+        "max_results": canonical_scope.max_results,
+        "force": canonical_scope.force,
+        "export_mode": canonical_scope.export_mode,
         "paper_ids": paper_ids,
-        "output_name": scope.output_name,
+        "output_name": canonical_scope.output_name,
     }
 
 

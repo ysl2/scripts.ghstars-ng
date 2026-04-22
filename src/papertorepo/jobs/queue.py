@@ -4,6 +4,7 @@ import asyncio
 from dataclasses import dataclass
 import os
 import socket
+import uuid
 from datetime import timedelta
 from typing import Any
 from collections.abc import Callable
@@ -23,7 +24,7 @@ from papertorepo.jobs.batches import (
 )
 from papertorepo.jobs.ordering import job_display_order_by, job_display_sort_key, job_execution_order_by
 from papertorepo.jobs.stop import JobStopRequested, mark_job_cancelled, raise_if_job_stop_requested, request_job_stop
-from papertorepo.db.models import Job, JobStatus, JobType, utc_now
+from papertorepo.db.models import Job, JobAttemptMode, JobStatus, JobType, utc_now
 from papertorepo.core.scope import build_scope_json, build_scope_payload, build_dedupe_key
 from papertorepo.api.schemas import ChildSummary, JobRead, ScopePayload, validate_scope_for_job
 from papertorepo.services.pipeline import (
@@ -37,7 +38,6 @@ from papertorepo.services.pipeline import (
 
 
 INIT_DATABASE_LOCK_ID = 649183502117041921
-ACTIVE_JOB_STATUSES = {JobStatus.pending, JobStatus.running}
 REUSED_CHILD_LOCKED_BY = "batch-reuse"
 
 
@@ -73,16 +73,16 @@ def _parent_job_clause(parent_job_id: str | None) -> object:
     return Job.parent_job_id.is_(None) if parent_job_id is None else Job.parent_job_id == parent_job_id
 
 
-def _create_job_record(
+def _find_active_job(
     db: Session,
-    job_type: JobType,
-    scope_json: dict[str, Any],
     *,
-    parent_job_id: str | None = None,
-) -> tuple[Job, bool]:
-    dedupe_key = build_dedupe_key(job_type.value, scope_json)
-    existing = db.scalar(
-        select(Job).where(
+    job_type: JobType,
+    dedupe_key: str,
+    parent_job_id: str | None,
+) -> Job | None:
+    return db.scalar(
+        select(Job)
+        .where(
             Job.job_type == job_type,
             Job.dedupe_key == dedupe_key,
             _parent_job_clause(parent_job_id),
@@ -94,21 +94,49 @@ def _create_job_record(
                 ),
             ),
         )
+        .order_by(*job_display_order_by())
     )
-    if existing is not None:
-        return existing, False
+
+
+def _insert_job_record(
+    db: Session,
+    job_type: JobType,
+    scope_json: dict[str, Any],
+    *,
+    parent_job_id: str | None = None,
+    attempt_mode: JobAttemptMode = JobAttemptMode.fresh,
+    attempt_series_key: str | None = None,
+) -> Job:
+    dedupe_key = build_dedupe_key(job_type.value, scope_json)
+    job_id = str(uuid.uuid4())
 
     job = Job(
+        id=job_id,
         parent_job_id=parent_job_id,
         job_type=job_type,
         status=JobStatus.pending,
+        attempt_mode=attempt_mode,
+        attempt_series_key=attempt_series_key or job_id,
         scope_json=scope_json,
         dedupe_key=dedupe_key,
     )
     db.add(job)
     db.commit()
     db.refresh(job)
-    return job, True
+    return job
+
+
+def _resolve_sync_target_job_type(
+    job_type: JobType,
+    scope_json: dict[str, Any],
+    *,
+    parent_job_id: str | None,
+) -> JobType:
+    target_job_type = job_type
+    batch_root_job_type = batch_root_job_type_for_child(job_type)
+    if batch_root_job_type is not None and parent_job_id is None and should_create_batch_root(job_type, scope_json):
+        target_job_type = batch_root_job_type
+    return target_job_type
 
 
 def create_job(
@@ -117,11 +145,50 @@ def create_job(
     scope: ScopePayload,
     *,
     parent_job_id: str | None = None,
+    attempt_mode: JobAttemptMode = JobAttemptMode.fresh,
+    attempt_series_key: str | None = None,
 ) -> Job:
     validate_scope_for_job(scope, job_type)
     scope_json = build_scope_json(scope)
-    job, _created = _create_job_record(db, job_type, scope_json, parent_job_id=parent_job_id)
-    return job
+    return _insert_job_record(
+        db,
+        job_type,
+        scope_json,
+        parent_job_id=parent_job_id,
+        attempt_mode=attempt_mode,
+        attempt_series_key=attempt_series_key,
+    )
+
+
+def launch_sync_job(
+    db: Session,
+    job_type: JobType,
+    scope: ScopePayload,
+    *,
+    parent_job_id: str | None = None,
+    attempt_mode: JobAttemptMode = JobAttemptMode.fresh,
+    attempt_series_key: str | None = None,
+) -> Job:
+    validate_scope_for_job(scope, job_type)
+    scope_json = build_scope_json(scope)
+    target_job_type = _resolve_sync_target_job_type(job_type, scope_json, parent_job_id=parent_job_id)
+    dedupe_key = build_dedupe_key(target_job_type.value, scope_json)
+    existing = _find_active_job(
+        db,
+        job_type=target_job_type,
+        dedupe_key=dedupe_key,
+        parent_job_id=parent_job_id,
+    )
+    if existing is not None:
+        raise RuntimeError(f"An identical job is already active ({existing.id[:8]}).")
+    return _insert_job_record(
+        db,
+        target_job_type,
+        scope_json,
+        parent_job_id=parent_job_id,
+        attempt_mode=attempt_mode,
+        attempt_series_key=attempt_series_key,
+    )
 
 
 def create_sync_job(
@@ -130,19 +197,38 @@ def create_sync_job(
     scope: ScopePayload,
     *,
     parent_job_id: str | None = None,
+    attempt_mode: JobAttemptMode = JobAttemptMode.fresh,
+    attempt_series_key: str | None = None,
 ) -> Job:
     validate_scope_for_job(scope, job_type)
     scope_json = build_scope_json(scope)
-    target_job_type = job_type
-    batch_root_job_type = batch_root_job_type_for_child(job_type)
-    if batch_root_job_type is not None and parent_job_id is None and should_create_batch_root(job_type, scope_json):
-        target_job_type = batch_root_job_type
-    job, _created = _create_job_record(db, target_job_type, scope_json, parent_job_id=parent_job_id)
-    return job
+    target_job_type = _resolve_sync_target_job_type(job_type, scope_json, parent_job_id=parent_job_id)
+    return _insert_job_record(
+        db,
+        target_job_type,
+        scope_json,
+        parent_job_id=parent_job_id,
+        attempt_mode=attempt_mode,
+        attempt_series_key=attempt_series_key,
+    )
 
 
-def create_sync_arxiv_job(db: Session, scope: ScopePayload, *, parent_job_id: str | None = None) -> Job:
-    return create_sync_job(db, JobType.sync_arxiv, scope, parent_job_id=parent_job_id)
+def create_sync_arxiv_job(
+    db: Session,
+    scope: ScopePayload,
+    *,
+    parent_job_id: str | None = None,
+    attempt_mode: JobAttemptMode = JobAttemptMode.fresh,
+    attempt_series_key: str | None = None,
+) -> Job:
+    return create_sync_job(
+        db,
+        JobType.sync_arxiv,
+        scope,
+        parent_job_id=parent_job_id,
+        attempt_mode=attempt_mode,
+        attempt_series_key=attempt_series_key,
+    )
 
 
 def _latest_jobs_by_dedupe(jobs: list[Job]) -> list[Job]:
@@ -214,19 +300,11 @@ def _batch_state_for_job(job: Job, child_summary: ChildSummary | None) -> str:
     return "succeeded"
 
 
-def _latest_attempt_for_scope(
-    db: Session,
-    *,
-    job_type: JobType,
-    dedupe_key: str,
-    parent_job_id: str | None,
-) -> Job | None:
+def _latest_attempt_in_series(db: Session, attempt_series_key: str) -> Job | None:
     return db.scalar(
         select(Job)
         .where(
-            Job.job_type == job_type,
-            Job.dedupe_key == dedupe_key,
-            _parent_job_clause(parent_job_id),
+            Job.attempt_series_key == attempt_series_key,
         )
         .order_by(*job_display_order_by())
     )
@@ -237,8 +315,7 @@ def _batch_root_attempts(db: Session, batch_job: Job) -> list[Job]:
         db.scalars(
             select(Job)
             .where(
-                Job.job_type == batch_job.job_type,
-                Job.dedupe_key == batch_job.dedupe_key,
+                Job.attempt_series_key == batch_job.attempt_series_key,
                 Job.parent_job_id.is_(None),
             )
             .order_by(*job_display_order_by())
@@ -279,12 +356,16 @@ def _create_reused_child_record(
     child_scope_json: dict[str, Any],
     parent_job_id: str,
     source_job: Job,
+    attempt_mode: JobAttemptMode,
 ) -> Job:
     timestamp = utc_now()
     job = Job(
+        id=str(uuid.uuid4()),
         parent_job_id=parent_job_id,
         job_type=child_job_type,
         status=JobStatus.succeeded,
+        attempt_mode=attempt_mode,
+        attempt_series_key=source_job.attempt_series_key,
         scope_json=child_scope_json,
         dedupe_key=build_dedupe_key(child_job_type.value, child_scope_json),
         stats_json={
@@ -308,8 +389,8 @@ def list_child_jobs(db: Session, parent_job_id: str) -> list[Job]:
     return list(db.scalars(select(Job).where(Job.parent_job_id == parent_job_id).order_by(*job_display_order_by())))
 
 
-def _attempt_meta_subquery(*, parent_job_id: str | None = None):
-    partition_by = (Job.parent_job_id, Job.dedupe_key)
+def _attempt_meta_subquery():
+    partition_by = (Job.attempt_series_key,)
     stmt = select(
         Job.id.label("job_id"),
         func.count(Job.id).over(partition_by=partition_by).label("attempt_count"),
@@ -318,8 +399,6 @@ def _attempt_meta_subquery(*, parent_job_id: str | None = None):
             order_by=job_display_order_by(),
         ).label("attempt_rank"),
     )
-    if parent_job_id is not None:
-        stmt = stmt.where(Job.parent_job_id == parent_job_id)
     return stmt.subquery()
 
 
@@ -341,17 +420,15 @@ def list_jobs_read(
     root_only: bool = False,
     view: str = "all",
 ) -> list[JobRead]:
-    attempt_meta = _attempt_meta_subquery(parent_job_id=parent_job_id)
-    stmt = (
-        select(Job, attempt_meta.c.attempt_count, attempt_meta.c.attempt_rank)
-        .join(attempt_meta, Job.id == attempt_meta.c.job_id)
-        .order_by(*job_display_order_by())
-        .limit(limit)
-    )
+    attempt_meta = _attempt_meta_subquery()
+    stmt = select(Job, attempt_meta.c.attempt_count, attempt_meta.c.attempt_rank).join(attempt_meta, Job.id == attempt_meta.c.job_id)
     if root_only and parent_job_id is None:
         stmt = stmt.where(Job.parent_job_id.is_(None))
+    if parent_job_id is not None:
+        stmt = stmt.where(Job.parent_job_id == parent_job_id)
     if view == "latest":
         stmt = stmt.where(attempt_meta.c.attempt_rank == 1)
+    stmt = stmt.order_by(*job_display_order_by()).limit(limit)
     rows = list(db.execute(stmt).all())
     jobs = [row[0] for row in rows]
     attempt_meta_by_id = {
@@ -369,9 +446,7 @@ def list_job_attempts_read(db: Session, job_id: str, *, limit: int = 100) -> lis
         select(Job, attempt_meta.c.attempt_count, attempt_meta.c.attempt_rank)
         .join(attempt_meta, Job.id == attempt_meta.c.job_id)
         .where(
-            Job.job_type == job.job_type,
-            Job.dedupe_key == job.dedupe_key,
-            _parent_job_clause(job.parent_job_id),
+            Job.attempt_series_key == job.attempt_series_key,
         )
         .order_by(*job_display_order_by())
         .limit(limit)
@@ -404,6 +479,8 @@ def serialize_job(
         parent_job_id=job.parent_job_id,
         job_type=job.job_type,
         status=job.status,
+        attempt_mode=job.attempt_mode,
+        attempt_series_key=job.attempt_series_key,
         scope_json=job.scope_json,
         dedupe_key=job.dedupe_key,
         stats_json=job.stats_json,
@@ -455,18 +532,31 @@ def _batch_root_has_retryable_scopes(child_summary: ChildSummary) -> bool:
 
 
 def _rerun_direct_sync_job(db: Session, job: Job, scope: ScopePayload) -> Job:
-    latest_attempt = _latest_attempt_for_scope(
+    latest_attempt = _latest_attempt_in_series(db, job.attempt_series_key)
+    if latest_attempt is None or latest_attempt.id != job.id:
+        raise RuntimeError("Only the latest run in this repair chain can be re-run")
+    existing = _find_active_job(
         db,
         job_type=job.job_type,
         dedupe_key=job.dedupe_key,
         parent_job_id=job.parent_job_id,
     )
-    if latest_attempt is not None and latest_attempt.id != job.id and latest_attempt.status in ACTIVE_JOB_STATUSES:
-        raise RuntimeError("A newer attempt is still active")
-    return create_sync_job(db, job.job_type, scope)
+    if existing is not None:
+        raise RuntimeError(f"An identical job is already active ({existing.id[:8]}).")
+    return create_sync_job(
+        db,
+        job.job_type,
+        scope,
+        attempt_mode=JobAttemptMode.repair,
+        attempt_series_key=job.attempt_series_key,
+    )
 
 
 def _rerun_batch_child_job(db: Session, job: Job, scope: ScopePayload) -> Job:
+    latest_attempt = _latest_attempt_in_series(db, job.attempt_series_key)
+    if latest_attempt is None or latest_attempt.id != job.id:
+        raise RuntimeError("Only the latest run in this repair chain can be re-run")
+
     parent_job = db.get(Job, job.parent_job_id) if job.parent_job_id is not None else None
     if parent_job is None or not _job_is_batch_root(parent_job):
         raise RuntimeError("Batch child job is missing its parent batch folder")
@@ -475,21 +565,28 @@ def _rerun_batch_child_job(db: Session, job: Job, scope: ScopePayload) -> Job:
     if latest_parent is None or latest_parent.id != parent_job.id:
         raise RuntimeError("Only child jobs from the latest batch attempt can be re-run")
 
-    latest_attempt = _latest_attempt_for_scope(
+    existing = _find_active_job(
         db,
         job_type=job.job_type,
         dedupe_key=job.dedupe_key,
         parent_job_id=latest_parent.id,
     )
-    if latest_attempt is not None and latest_attempt.id != job.id and latest_attempt.status in ACTIVE_JOB_STATUSES:
-        raise RuntimeError("A newer attempt is still active")
-    return create_job(db, job.job_type, scope, parent_job_id=latest_parent.id)
+    if existing is not None:
+        raise RuntimeError(f"An identical job is already active ({existing.id[:8]}).")
+    return create_job(
+        db,
+        job.job_type,
+        scope,
+        parent_job_id=latest_parent.id,
+        attempt_mode=JobAttemptMode.repair,
+        attempt_series_key=job.attempt_series_key,
+    )
 
 
 def _rerun_batch_root_job(db: Session, job: Job, scope: ScopePayload) -> Job:
-    latest_batch_attempt = _latest_batch_root_attempt(db, job)
+    latest_batch_attempt = _latest_attempt_in_series(db, job.attempt_series_key)
     if latest_batch_attempt is None or latest_batch_attempt.id != job.id:
-        raise RuntimeError("Only the latest batch attempt can be re-run")
+        raise RuntimeError("Only the latest run in this repair chain can be re-run")
 
     child_summary = _child_summary_for_batch(job, list_child_jobs(db, job.id))
     if _batch_state_for_job(job, child_summary) in {"queued", "running", "stopping"}:
@@ -500,7 +597,21 @@ def _rerun_batch_root_job(db: Session, job: Job, scope: ScopePayload) -> Job:
     child_job_type = batch_child_job_type_for_root(job.job_type)
     if child_job_type is None:
         raise RuntimeError("Unsupported batch job type")
-    return create_sync_job(db, child_job_type, scope)
+    existing = _find_active_job(
+        db,
+        job_type=job.job_type,
+        dedupe_key=job.dedupe_key,
+        parent_job_id=None,
+    )
+    if existing is not None:
+        raise RuntimeError(f"An identical job is already active ({existing.id[:8]}).")
+    return create_sync_job(
+        db,
+        child_job_type,
+        scope,
+        attempt_mode=JobAttemptMode.repair,
+        attempt_series_key=job.attempt_series_key,
+    )
 
 
 def rerun_job(db: Session, job_id: str) -> Job:
@@ -587,21 +698,31 @@ async def run_batch_root_job(
         if stop_check is not None:
             stop_check()
 
-        latest_child = _latest_batch_lineage_child_attempt(
-            db,
-            batch_job=job,
-            child_job_type=child_job_type,
-            child_scope_json=child_scope_json,
+        child_dedupe_key = build_dedupe_key(child_job_type.value, child_scope_json)
+        current_attempt_child = db.scalar(
+            select(Job)
+            .where(
+                Job.job_type == child_job_type,
+                Job.dedupe_key == child_dedupe_key,
+                Job.parent_job_id == job.id,
+                Job.status.in_([JobStatus.pending, JobStatus.running, JobStatus.succeeded]),
+            )
+            .order_by(*job_display_order_by())
         )
-        if latest_child is not None and latest_child.parent_job_id == job.id and latest_child.status in {
-            JobStatus.pending,
-            JobStatus.running,
-            JobStatus.succeeded,
-        }:
+        if current_attempt_child is not None:
             stats["children_existing"] += 1
             if progress is not None:
                 progress(dict(stats))
             continue
+
+        latest_child = None
+        if job.attempt_mode == JobAttemptMode.repair:
+            latest_child = _latest_batch_lineage_child_attempt(
+                db,
+                batch_job=job,
+                child_job_type=child_job_type,
+                child_scope_json=child_scope_json,
+            )
 
         if latest_child is not None and latest_child.status == JobStatus.succeeded:
             _create_reused_child_record(
@@ -610,20 +731,21 @@ async def run_batch_root_job(
                 child_scope_json=child_scope_json,
                 parent_job_id=job.id,
                 source_job=latest_child,
+                attempt_mode=job.attempt_mode,
             )
             stats["children_reused_success"] += 1
         else:
             child_scope = build_scope_payload(child_scope_json)
-            _child, created = _create_job_record(
+            child_series_key = latest_child.attempt_series_key if latest_child is not None else None
+            _insert_job_record(
                 db,
                 child_job_type,
                 build_scope_json(child_scope),
                 parent_job_id=job.id,
+                attempt_mode=job.attempt_mode,
+                attempt_series_key=child_series_key,
             )
-            if created:
-                stats["children_enqueued"] += 1
-            else:
-                stats["children_existing"] += 1
+            stats["children_enqueued"] += 1
         if progress is not None:
             progress(dict(stats))
     return stats
