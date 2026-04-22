@@ -3047,15 +3047,7 @@ function App() {
 
   const activeLoadedRows = previewTab === 'papers' ? papers.length : previewTab === 'jobs' ? jobRows.length : exportsData.length
   const activeTotalRows = previewTab === 'papers' ? paperTotalRows : activeLoadedRows
-  const defaultVisibleRowsLabel = `${visibleKeys.length.toLocaleString()} rows visible, ${activeTotalRows.toLocaleString()} rows in total`
-  const paperSummaryLabel = papersLoading
-    ? paperProgressTotal !== undefined
-      ? papersLoadedCount > 0
-        ? `${Math.min(papersLoadedCount, paperProgressTotal).toLocaleString()} loaded, ${paperProgressTotal.toLocaleString()} total`
-        : `Loading ${paperProgressTotal.toLocaleString()} rows…`
-      : 'Loading papers…'
-    : `${visibleKeys.length.toLocaleString()} rows visible, ${(paperProgressTotal ?? papers.length).toLocaleString()} rows in total`
-  const tableSummaryLabel = previewTab === 'papers' ? paperSummaryLabel : defaultVisibleRowsLabel
+  const tableSummaryLabel = `${visibleKeys.length.toLocaleString()} / ${activeTotalRows.toLocaleString()} rows`
   const quickSearchPlaceholder =
     previewTab === 'papers'
       ? 'Search title, abstract, authors, repo...'
@@ -3089,7 +3081,11 @@ function App() {
     </label>
   )
 
-  const sheetToolbarSummary = <span className="sheet-inline-summary">{tableSummaryLabel}</span>
+  const sheetToolbarSummary = (
+    <span className="sheet-inline-summary" title="Rows currently shown / rows in total">
+      {tableSummaryLabel}
+    </span>
+  )
 
   const sheetToolbarActions = (
     <button

@@ -707,22 +707,22 @@ summary:focus {
   padding: 6px 10px;
   border: 1px solid rgba(26, 91, 71, 0.1);
   border-radius: 12px;
-  background: rgba(248, 250, 248, 0.94);
+  background: rgba(248, 250, 248, 0.92);
   overflow: hidden;
 }
 
 .queue-summary-loading {
-  background: rgba(244, 247, 244, 0.96);
+  background: rgba(248, 250, 248, 0.92);
 }
 
 .queue-summary-idle {
-  background: rgba(34, 96, 74, 0.08);
+  background: rgba(248, 250, 248, 0.92);
 }
 
 .queue-summary-active,
 .queue-summary-stopping,
 .queue-summary-waiting {
-  background: rgba(248, 250, 248, 0.94);
+  background: rgba(248, 250, 248, 0.92);
 }
 
 .queue-summary-counts {
