@@ -1,6 +1,6 @@
 """Add daily arXiv freshness ledger and richer paper feed fields.
 
-Revision ID: 0009_arxiv_daily_freshness_and_feed_fields
+Revision ID: 0009_arxiv_daily_feed_fields
 Revises: 0008_job_attempt_series_key
 Create Date: 2026-04-23 14:00:00
 """
@@ -10,7 +10,7 @@ from alembic import op
 import sqlalchemy as sa
 
 
-revision = "0009_arxiv_daily_freshness_and_feed_fields"
+revision = "0009_arxiv_daily_feed_fields"
 down_revision = "0008_job_attempt_series_key"
 branch_labels = None
 depends_on = None
