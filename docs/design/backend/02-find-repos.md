@@ -4,7 +4,7 @@
 
 `find-repos` 的目标是为 scope 内的论文寻找最可信的 GitHub 仓库链接，并给出一个稳定状态。
 
-当前代码命令名是 `sync-links`，design 中统一称为 `find-repos`，因为它表达的是业务意图，而不是实现动作。
+当前代码命令名是 `sync-links`，需要统一改成`find-repos`
 
 它解决的问题是：
 

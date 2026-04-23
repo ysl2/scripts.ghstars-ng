@@ -11,8 +11,8 @@
 其中，当前代码里的命令名分别是：
 
 - `sync-arxiv`
-- `sync-links`，在 design 中统一称为 `find-repos`
-- `enrich`，在 design 中统一称为 `refresh-metadata`
+- `sync-links`，需要统一改成`find-repos`
+- `enrich`，需要统一改成`refresh-metadata`
 
 这三条能力组成一条顺序明确的数据链路：
 
