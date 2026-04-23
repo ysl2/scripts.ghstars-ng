@@ -8,12 +8,6 @@
 - `find-repos`：为论文寻找 GitHub 仓库链接
 - `refresh-metadata`：刷新已发现 GitHub 仓库的元数据
 
-其中，当前代码里的命令名分别是：
-
-- `sync-arxiv`
-- `sync-links`，需要统一改成`find-repos`
-- `enrich`，需要统一改成`refresh-metadata`
-
 这三条能力组成一条顺序明确的数据链路：
 
 1. 先有论文。

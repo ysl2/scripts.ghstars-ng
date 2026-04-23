@@ -4,8 +4,6 @@
 
 `refresh-metadata` 的目标是刷新 scope 内已发现 GitHub 仓库的元数据，让系统里保留的是“最近一次可验证的仓库信息”。
 
-当前代码命令名是 `enrich`，需要统一改成 `refresh-metadata`
-
 它解决的问题是：
 
 - 把论文级 repo URL 变成仓库级结构化信息
