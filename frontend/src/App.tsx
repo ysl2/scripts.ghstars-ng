@@ -844,10 +844,10 @@ function canRerunJobInContext(job: Job, parentJob?: Job | null) {
 
 function canStopJob(job: Job) {
   const displayStatus = jobDisplayStatus(job)
-  if (job.stop_requested_at) return false
   if (isBatchRootType(job.job_type) && job.parent_job_id === null) {
     return displayStatus === 'queued' || displayStatus === 'running'
   }
+  if (job.stop_requested_at) return false
   return job.status === 'pending' || job.status === 'running'
 }
 

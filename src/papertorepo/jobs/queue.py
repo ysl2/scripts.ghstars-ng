@@ -674,6 +674,53 @@ def _batch_root_has_retryable_scopes(child_summary: ChildSummary) -> bool:
     return child_summary.failed > 0 or child_summary.cancelled > 0 or child_summary.pending > 0
 
 
+def _rerun_batch_root_children_in_place(db: Session, job: Job) -> Job:
+    child_job_type = batch_child_job_type_for_root(job.job_type)
+    if child_job_type is None:
+        raise RuntimeError("Unsupported batch job type")
+
+    stats = {
+        "children_total": 0,
+        "children_enqueued": 0,
+        "children_succeeded": 0,
+        "children_existing": 0,
+    }
+    for child_scope_json in _planned_batch_child_scopes(job):
+        stats["children_total"] += 1
+        latest_child = _latest_batch_lineage_child_attempt(
+            db,
+            batch_job=job,
+            child_job_type=child_job_type,
+            child_scope_json=child_scope_json,
+        )
+        if latest_child is not None and latest_child.status == JobStatus.succeeded:
+            stats["children_succeeded"] += 1
+            continue
+        if latest_child is not None and latest_child.status in {JobStatus.pending, JobStatus.running}:
+            stats["children_existing"] += 1
+            continue
+
+        _insert_job_record(
+            db,
+            child_job_type,
+            child_scope_json,
+            parent_job_id=job.id,
+            attempt_mode=JobAttemptMode.repair,
+            attempt_series_key=latest_child.attempt_series_key if latest_child is not None else None,
+        )
+        stats["children_enqueued"] += 1
+
+    job.stats_json = stats
+    db.add(job)
+    db.commit()
+    db.refresh(job)
+    logger.info(
+        "Queued batch root rerun child repairs in place",
+        extra={"job_id": job.id, "children_enqueued": stats["children_enqueued"], "children_total": stats["children_total"]},
+    )
+    return job
+
+
 def _rerun_direct_sync_job(db: Session, job: Job, scope: ScopePayload) -> Job:
     latest_attempt = _latest_attempt_in_series(db, job.attempt_series_key)
     if latest_attempt is None or latest_attempt.id != job.id:
@@ -746,9 +793,6 @@ def _rerun_batch_root_job(db: Session, job: Job, scope: ScopePayload) -> Job:
     if not _batch_root_has_retryable_scopes(child_summary):
         raise RuntimeError("All child scopes already succeeded")
 
-    child_job_type = batch_child_job_type_for_root(job.job_type)
-    if child_job_type is None:
-        raise RuntimeError("Unsupported batch job type")
     existing = _find_active_job(
         db,
         job_type=job.job_type,
@@ -757,13 +801,7 @@ def _rerun_batch_root_job(db: Session, job: Job, scope: ScopePayload) -> Job:
     )
     if existing is not None:
         raise RuntimeError(f"An identical job is already active ({existing.id[:8]}).")
-    return create_sync_job(
-        db,
-        child_job_type,
-        scope,
-        attempt_mode=JobAttemptMode.repair,
-        attempt_series_key=job.attempt_series_key,
-    )
+    return _rerun_batch_root_children_in_place(db, job)
 
 
 def rerun_job(db: Session, job_id: str) -> Job:

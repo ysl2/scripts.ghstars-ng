@@ -341,30 +341,28 @@ def test_rerun_api_supports_failed_only_batch_parent_rerun(db_env):
         child_response = client.post(f"/api/v1/jobs/{child.id}/rerun")
 
     assert batch_response.status_code == 200
+    assert batch_response.json()["id"] == parent.id
     assert batch_response.json()["job_type"] == JobType.sync_papers_batch.value
     assert batch_response.json()["parent_job_id"] is None
-    assert batch_response.json()["attempt_mode"] == JobAttemptMode.repair.value
+    assert batch_response.json()["attempt_mode"] == JobAttemptMode.fresh.value
+    assert batch_response.json()["batch_state"] == "queued"
     assert child_response.status_code == 409
 
-    rerun_batch_id = batch_response.json()["id"]
-
-    import asyncio
-
-    asyncio.run(process_job(rerun_batch_id))
-
     with session_scope() as db:
-        rerun_batch = db.get(Job, rerun_batch_id)
+        rerun_batch = db.get(Job, parent.id)
         assert rerun_batch is not None
-        refreshed_children = list(db.query(Job).filter(Job.parent_job_id == rerun_batch_id).order_by(Job.created_at.asc()).all())
+        latest_children = list_jobs_read(db, parent_job_id=parent.id, limit=10, view="latest")
+        all_children = list_jobs_read(db, parent_job_id=parent.id, limit=10, view="all")
 
     assert rerun_batch.status == JobStatus.succeeded
-    assert len(refreshed_children) == 2
-    assert sum(1 for item in refreshed_children if item.scope_json == child_scope and item.status == JobStatus.pending) == 1
-    reused_sibling = next(item for item in refreshed_children if item.scope_json in sibling_scopes)
-    assert reused_sibling.status == JobStatus.succeeded
-    assert reused_sibling.attempt_mode == JobAttemptMode.repair
-    assert reused_sibling.stats_json["reused"] is True
-    assert reused_sibling.stats_json["reused_from_job_id"] in {item.id for item in children[1:]}
+    assert len(latest_children) == 2
+    assert len(all_children) == 3
+    repair_child = next(item for item in latest_children if item.scope_json == child_scope)
+    assert repair_child.status == JobStatus.pending
+    assert repair_child.attempt_mode == JobAttemptMode.repair
+    succeeded_sibling = next(item for item in latest_children if item.scope_json in sibling_scopes)
+    assert succeeded_sibling.status == JobStatus.succeeded
+    assert succeeded_sibling.attempt_mode == JobAttemptMode.fresh
 
 
 def test_rerun_api_supports_latest_batch_child_jobs(db_env):
@@ -398,25 +396,26 @@ def test_rerun_api_supports_latest_batch_child_jobs(db_env):
         batch_response = client.post(f"/api/v1/jobs/{parent.id}/rerun")
 
     assert batch_response.status_code == 200
-    rerun_batch_id = batch_response.json()["id"]
-    asyncio.run(process_job(rerun_batch_id))
+    assert batch_response.json()["id"] == parent.id
 
     with session_scope() as db:
-        latest_batch_children = list(db.query(Job).filter(Job.parent_job_id == rerun_batch_id).order_by(Job.created_at.asc()).all())
-        latest_child = next(item for item in latest_batch_children if item.status == JobStatus.pending)
+        latest_batch_children = list_jobs_read(db, parent_job_id=parent.id, limit=10, view="latest")
+        latest_child_read = next(item for item in latest_batch_children if item.status == JobStatus.pending)
+        latest_child = db.get(Job, latest_child_read.id)
+        assert latest_child is not None
         latest_child.status = JobStatus.failed
         latest_child.finished_at = latest_child.created_at
         latest_child_scope = dict(latest_child.scope_json)
 
     with TestClient(app) as client:
         child_response = client.post(f"/api/v1/jobs/{latest_child.id}/rerun")
-        latest_children_response = client.get(f"/api/v1/jobs?parent_id={rerun_batch_id}&view=latest&limit=10")
-        all_children_response = client.get(f"/api/v1/jobs?parent_id={rerun_batch_id}&view=all&limit=10")
+        latest_children_response = client.get(f"/api/v1/jobs?parent_id={parent.id}&view=latest&limit=10")
+        all_children_response = client.get(f"/api/v1/jobs?parent_id={parent.id}&view=all&limit=10")
         attempts_response = client.get(f"/api/v1/jobs/{latest_child.id}/attempts?limit=10")
 
     assert child_response.status_code == 200
     assert child_response.json()["job_type"] == JobType.sync_papers.value
-    assert child_response.json()["parent_job_id"] == rerun_batch_id
+    assert child_response.json()["parent_job_id"] == parent.id
     assert child_response.json()["attempt_count"] == 3
     assert child_response.json()["attempt_rank"] == 1
 
@@ -430,7 +429,7 @@ def test_rerun_api_supports_latest_batch_child_jobs(db_env):
 
     assert all_children_response.status_code == 200
     all_children = all_children_response.json()
-    assert len(all_children) == 3
+    assert len(all_children) == 4
     original_child = next(item for item in all_children if item["id"] == latest_child.id)
     assert original_child["attempt_count"] == 3
     assert original_child["attempt_rank"] == 2
@@ -618,6 +617,86 @@ def _create_batch_with_child_states(
         children.append(child)
     db.add(parent)
     return parent, children
+
+
+@pytest.mark.parametrize(
+    ("parent_job_type", "child_job_type"),
+    [
+        (JobType.sync_papers_batch, JobType.sync_papers),
+        (JobType.find_repos_batch, JobType.find_repos),
+        (JobType.refresh_metadata_batch, JobType.refresh_metadata),
+    ],
+)
+def test_batch_root_rerun_creates_child_repairs_in_place_for_all_batch_types(db_env, parent_job_type, child_job_type):
+    with session_scope() as db:
+        parent, children = _create_batch_with_child_states(
+            db,
+            parent_job_type,
+            child_job_type,
+            [
+                (JobStatus.failed, False),
+                (JobStatus.cancelled, False),
+                (JobStatus.succeeded, False),
+            ],
+        )
+        original_child_by_dedupe = {child.dedupe_key: child for child in children}
+
+        rerun_parent = rerun_job(db, parent.id)
+        assert rerun_parent.id == parent.id
+        assert serialize_job(db, rerun_parent).batch_state == "queued"
+
+        latest_rows = list_jobs_read(db, parent_job_id=parent.id, limit=10, view="latest")
+        all_rows = list_jobs_read(db, parent_job_id=parent.id, limit=10, view="all")
+
+    assert len(latest_rows) == 3
+    assert len(all_rows) == 5
+    assert sum(1 for row in latest_rows if row.status == JobStatus.pending and row.attempt_mode == JobAttemptMode.repair) == 2
+    assert sum(1 for row in latest_rows if row.status == JobStatus.succeeded and row.attempt_mode == JobAttemptMode.fresh) == 1
+
+    for row in latest_rows:
+        original_child = original_child_by_dedupe[row.dedupe_key]
+        if original_child.status in {JobStatus.failed, JobStatus.cancelled}:
+            assert row.id != original_child.id
+            assert row.attempt_series_key == original_child.attempt_series_key
+        else:
+            assert row.id == original_child.id
+
+
+@pytest.mark.parametrize(
+    ("parent_job_type", "child_job_type"),
+    [
+        (JobType.sync_papers_batch, JobType.sync_papers),
+        (JobType.find_repos_batch, JobType.find_repos),
+        (JobType.refresh_metadata_batch, JobType.refresh_metadata),
+    ],
+)
+def test_batch_root_rerun_creates_missing_child_scopes_in_place(db_env, parent_job_type, child_job_type):
+    with session_scope() as db:
+        parent = create_job(
+            db,
+            parent_job_type,
+            ScopePayload(categories=["cs.CV"], **{"from": date(2026, 4, 1), "to": date(2026, 6, 30)}),
+        )
+        parent.status = JobStatus.succeeded
+        parent.stop_requested_at = parent.created_at
+        planned_scopes = planned_child_scope_jsons(parent.job_type, parent.scope_json)
+        existing_child = create_job(
+            db,
+            child_job_type,
+            ScopePayload.model_validate(planned_scopes[0]),
+            parent_job_id=parent.id,
+        )
+        existing_child.status = JobStatus.succeeded
+        existing_child.finished_at = existing_child.created_at
+        db.add_all([parent, existing_child])
+
+        rerun_parent = rerun_job(db, parent.id)
+        latest_rows = list_jobs_read(db, parent_job_id=parent.id, limit=10, view="latest")
+
+    assert rerun_parent.id == parent.id
+    assert len(latest_rows) == 3
+    assert sum(1 for row in latest_rows if row.status == JobStatus.pending and row.attempt_mode == JobAttemptMode.repair) == 2
+    assert sum(1 for row in latest_rows if row.status == JobStatus.succeeded and row.id == existing_child.id) == 1
 
 
 @pytest.mark.parametrize(
