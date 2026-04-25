@@ -2101,6 +2101,13 @@ summary:focus {
   background: rgba(245, 248, 246, 0.92);
 }
 
+.job-tree-toggle.expanded.loading,
+.job-history-toggle.expanded.loading {
+  border-color: rgba(26, 91, 71, 0.44);
+  background: rgba(26, 91, 71, 0.12);
+  color: var(--accent);
+}
+
 .job-tree-toggle-icon,
 .job-history-toggle-icon {
   display: inline-flex;
@@ -2126,6 +2133,11 @@ summary:focus {
 .job-tree-toggle.loading .job-tree-toggle-icon svg,
 .job-history-toggle.loading .job-history-toggle-icon svg {
   opacity: 0.6;
+}
+
+.job-tree-toggle.expanded.loading .job-tree-toggle-icon svg,
+.job-history-toggle.expanded.loading .job-history-toggle-icon svg {
+  opacity: 1;
 }
 
 .job-tree-spacer,

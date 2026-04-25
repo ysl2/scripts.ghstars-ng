@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 import pytest
 
@@ -115,6 +115,62 @@ async def test_process_job_failure_keeps_partial_stats(db_env, monkeypatch):
         assert refreshed.stats_json == {"categories": 1, "pages_fetched": 3}
         assert refreshed.error_text == "boom"
         assert refreshed.locked_at is not None
+
+
+def test_claim_next_job_waits_while_fresh_running_job_exists(db_env):
+    now = datetime.now(timezone.utc)
+
+    with session_scope() as db:
+        running = create_job(db, JobType.find_repos, ScopePayload(categories=["cs.CV"], month="2026-04"))
+        running.status = JobStatus.running
+        running.started_at = now
+        running.locked_at = now
+        running.locked_by = "worker:old"
+        pending = create_job(db, JobType.refresh_metadata, ScopePayload(categories=["cs.CV"], month="2026-05"))
+        pending_id = pending.id
+        db.add_all([running, pending])
+
+    with session_scope() as db:
+        claimed = claim_next_job(db, "worker:new")
+
+    assert claimed is None
+
+    with session_scope() as db:
+        pending_after = db.get(Job, pending_id)
+        assert pending_after is not None
+        assert pending_after.status == JobStatus.pending
+        assert pending_after.locked_by is None
+
+
+def test_claim_next_job_recovers_stale_running_job(db_env):
+    now = datetime.now(timezone.utc)
+
+    with session_scope() as db:
+        stale = create_job(db, JobType.find_repos, ScopePayload(categories=["cs.CV"], month="2026-04"))
+        stale.status = JobStatus.running
+        stale.started_at = now - timedelta(seconds=2000)
+        stale.locked_at = now - timedelta(seconds=2000)
+        stale.locked_by = "worker:old"
+        pending = create_job(db, JobType.refresh_metadata, ScopePayload(categories=["cs.CV"], month="2026-05"))
+        stale_id = stale.id
+        pending_id = pending.id
+        db.add_all([stale, pending])
+
+    with session_scope() as db:
+        claimed = claim_next_job(db, "worker:new")
+
+    assert claimed is not None
+    assert claimed.id == stale_id
+
+    with session_scope() as db:
+        stale_after = db.get(Job, stale_id)
+        pending_after = db.get(Job, pending_id)
+        assert stale_after is not None
+        assert stale_after.status == JobStatus.running
+        assert stale_after.locked_by == "worker:new"
+        assert stale_after.attempts == 1
+        assert pending_after is not None
+        assert pending_after.status == JobStatus.pending
 
 
 def test_serialize_pending_sync_papers_repair_includes_resume_summary(db_env):

@@ -80,6 +80,20 @@ def _parent_job_clause(parent_job_id: str | None) -> object:
     return Job.parent_job_id.is_(None) if parent_job_id is None else Job.parent_job_id == parent_job_id
 
 
+def _has_fresh_running_job(db: Session, stale_before: object) -> bool:
+    return (
+        db.scalar(
+            select(Job.id)
+            .where(
+                Job.status == JobStatus.running,
+                or_(Job.locked_at.is_(None), Job.locked_at >= stale_before),
+            )
+            .limit(1)
+        )
+        is not None
+    )
+
+
 def _find_active_job(
     db: Session,
     *,
@@ -943,6 +957,9 @@ async def run_batch_root_job(
 
 def claim_next_job(db: Session, worker_name: str) -> Job | None:
     stale_before = _fresh_running_after()
+    if _has_fresh_running_job(db, stale_before):
+        return None
+
     stmt = (
         select(Job)
         .where(
