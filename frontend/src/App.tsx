@@ -1496,9 +1496,14 @@ function App() {
   const papersRef = useRef<PaperSummary[]>([])
   const childJobsByParentIdRef = useRef<Record<string, Job[]>>({})
   const jobAttemptHistoriesRef = useRef<Record<string, Job[]>>({})
+  const expandedParentJobIdsRef = useRef<string[]>([])
+  const expandedJobGroupsRef = useRef<string[]>([])
   const validExpandedParentJobIdsRef = useRef<string[]>([])
   const validExpandedJobGroupsRef = useRef<string[]>([])
   const latestJobByGroupRef = useRef<Map<string, Job>>(new Map())
+  const selectedJobIdRef = useRef<string | null>(null)
+  const rerunSelectionHandoffJobIdRef = useRef<string | null>(null)
+  const rerunSelectionHandoffTimeoutRef = useRef<number | null>(null)
   const childJobAbortControllersRef = useRef<Map<string, AbortController>>(new Map())
   const historyAbortControllersRef = useRef<Map<string, AbortController>>(new Map())
   const queueHandoffTimeoutRef = useRef<number | null>(null)
@@ -1620,6 +1625,18 @@ function App() {
     jobAttemptHistoriesRef.current = jobAttemptHistories
   }, [jobAttemptHistories])
 
+  useEffect(() => {
+    expandedParentJobIdsRef.current = expandedParentJobIds
+  }, [expandedParentJobIds])
+
+  useEffect(() => {
+    expandedJobGroupsRef.current = expandedJobGroups
+  }, [expandedJobGroups])
+
+  useEffect(() => {
+    selectedJobIdRef.current = selectedJobId
+  }, [selectedJobId])
+
   const activeJobsInList = jobs.some((job) => {
     const displayStatus = jobDisplayStatus(job)
     return displayStatus === 'queued' || displayStatus === 'running' || displayStatus === 'stopping'
@@ -1631,12 +1648,30 @@ function App() {
     (dashboard?.running_jobs ?? 0) > 0 ||
     (dashboard?.stopping_jobs ?? 0) > 0
 
+  function clearRerunSelectionHandoff() {
+    rerunSelectionHandoffJobIdRef.current = null
+    if (rerunSelectionHandoffTimeoutRef.current !== null) {
+      window.clearTimeout(rerunSelectionHandoffTimeoutRef.current)
+      rerunSelectionHandoffTimeoutRef.current = null
+    }
+  }
+
+  function protectRerunSelectionHandoff(jobId: string) {
+    clearRerunSelectionHandoff()
+    rerunSelectionHandoffJobIdRef.current = jobId
+    rerunSelectionHandoffTimeoutRef.current = window.setTimeout(() => {
+      rerunSelectionHandoffJobIdRef.current = null
+      rerunSelectionHandoffTimeoutRef.current = null
+    }, 10000)
+  }
+
   useEffect(() => {
     return () => {
       if (queueHandoffTimeoutRef.current !== null) {
         window.clearTimeout(queueHandoffTimeoutRef.current)
         queueHandoffTimeoutRef.current = null
       }
+      clearRerunSelectionHandoff()
     }
   }, [])
 
@@ -2056,9 +2091,7 @@ function App() {
 
     function handleKeydown(event: KeyboardEvent) {
       if (event.key === 'Escape') {
-        setSelectedPaperId(null)
-        setSelectedJobId(null)
-        setSelectedExportId(null)
+        closeDrawer()
       }
     }
 
@@ -2156,15 +2189,65 @@ function App() {
     }
   }
 
-  async function rerunExistingJob(jobId: string) {
+  async function rerunExistingJob(jobId: string, sourceJob?: Job) {
+    const previousJob =
+      sourceJob ||
+      jobsById.get(jobId) ||
+      (selectedJobDetail?.id === jobId ? selectedJobDetail : null)
+    const shouldMoveSelection = selectedJobIdRef.current === jobId
+
     try {
       setRerunningJobId(jobId)
-      await fetchJson<Job>(`/api/v1/jobs/${jobId}/rerun`, {
+      const rerun = await fetchJson<Job>(`/api/v1/jobs/${jobId}/rerun`, {
         method: 'POST',
       })
+
+      const rerunGroupKey = attemptGroupKey(rerun)
+
+      if (previousJob && isBatchFolderJob(previousJob) && expandedParentJobIdsRef.current.includes(previousJob.id)) {
+        setExpandedParentJobIds((current) => (current.includes(rerun.id) ? current : [...current, rerun.id]))
+        cancelChildJobsLoad(rerun.id)
+        void loadChildJobs(rerun.id, { force: true })
+      }
+
+      const previousParentJobId = previousJob?.parent_job_id
+      if (previousParentJobId && expandedParentJobIdsRef.current.includes(previousParentJobId)) {
+        cancelChildJobsLoad(previousParentJobId)
+        setChildJobsByParentId((current) => {
+          const next = { ...current }
+          delete next[previousParentJobId]
+          childJobsByParentIdRef.current = next
+          return next
+        })
+        void loadChildJobs(previousParentJobId, { force: true })
+      }
+
+      if (expandedJobGroupsRef.current.includes(rerunGroupKey)) {
+        cancelJobHistoryLoad(rerunGroupKey)
+        setJobAttemptHistories((current) => {
+          const next = { ...current }
+          delete next[rerunGroupKey]
+          jobAttemptHistoriesRef.current = next
+          return next
+        })
+        void loadJobHistory(rerunGroupKey, rerun.id, { force: true })
+      }
+
+      if (shouldMoveSelection && selectedJobIdRef.current === jobId) {
+        protectRerunSelectionHandoff(rerun.id)
+        selectedJobIdRef.current = rerun.id
+        selectedJobDetailHydratedJobIdRef.current = rerun.id
+        setSelectedPaperId(null)
+        setSelectedExportId(null)
+        setSelectedJobId(rerun.id)
+        setSelectedJobDetail(rerun)
+        setSelectedJobDetailLoading(false)
+      }
+
       setSummaryRefreshTick((value) => value + 1)
       setJobsRefreshTick((value) => value + 1)
       setTableRefreshTick((value) => value + 1)
+      setSelectedJobRefreshTick((value) => value + 1)
       setError(null)
     } catch (err) {
       if (err instanceof Error) setError(err.message)
@@ -2834,9 +2917,11 @@ function App() {
   }, [previewTab, selectedJob?.attempt_count, selectedJob?.id, selectedJobRefreshTick])
 
   function closeDrawer() {
+    clearRerunSelectionHandoff()
     selectedJobDetailHydratedJobIdRef.current = null
     selectedJobChildrenHydratedJobIdRef.current = null
     selectedJobAttemptsHydratedJobIdRef.current = null
+    selectedJobIdRef.current = null
     setSelectedPaperId(null)
     setSelectedJobId(null)
     setSelectedExportId(null)
@@ -2844,6 +2929,18 @@ function App() {
     setSelectedJobDetailLoading(false)
     setSelectedJobChildren([])
     setSelectedJobAttempts([])
+  }
+
+  function selectJob(jobId: string | null) {
+    const rerunHandoffJobId = rerunSelectionHandoffJobIdRef.current
+    if (jobId === null && rerunHandoffJobId && selectedJobIdRef.current === rerunHandoffJobId) {
+      return
+    }
+    if (jobId !== rerunHandoffJobId) {
+      clearRerunSelectionHandoff()
+    }
+    selectedJobIdRef.current = jobId
+    setSelectedJobId(jobId)
   }
 
   function handlePreviewTabChange(nextTab: PreviewTab) {
@@ -2856,9 +2953,11 @@ function App() {
     setPreviewTab(nextTab)
     setTableSearch('')
     setVisibleKeys([])
+    clearRerunSelectionHandoff()
     selectedJobDetailHydratedJobIdRef.current = null
     selectedJobChildrenHydratedJobIdRef.current = null
     selectedJobAttemptsHydratedJobIdRef.current = null
+    selectedJobIdRef.current = null
     setSelectedPaperId(null)
     setSelectedJobId(null)
     setSelectedExportId(null)
@@ -2877,12 +2976,20 @@ function App() {
 
   function handleDisplayedKeysChange(keys: string[]) {
     setVisibleKeys(keys)
+    const rerunHandoffJobId = rerunSelectionHandoffJobIdRef.current
+    if (rerunHandoffJobId && selectedJobId !== rerunHandoffJobId) {
+      clearRerunSelectionHandoff()
+    } else if (rerunHandoffJobId && keys.includes(rerunHandoffJobId)) {
+      clearRerunSelectionHandoff()
+    }
 
     if (previewTab === 'papers' && selectedPaperId && !keys.includes(selectedPaperId)) {
       setSelectedPaperId(null)
       return
     }
     if (previewTab === 'jobs' && selectedJobId && !keys.includes(selectedJobId)) {
+      if (rerunHandoffJobId === selectedJobId) return
+      selectedJobIdRef.current = null
       setSelectedJobId(null)
       return
     }
@@ -3004,7 +3111,7 @@ function App() {
                 <button
                   type="button"
                   className="ghost-button"
-                  onClick={() => setSelectedJobId(selectedJobLatestAttempt.id)}
+                  onClick={() => selectJob(selectedJobLatestAttempt.id)}
                 >
                   Jump to latest
                 </button>
@@ -3013,7 +3120,7 @@ function App() {
                 <button
                   type="button"
                   className="primary-button"
-                  onClick={() => void rerunExistingJob(selectedJob.id)}
+                  onClick={() => void rerunExistingJob(selectedJob.id, selectedJob)}
                   disabled={rerunningJobId === selectedJob.id}
                 >
                   {rerunningJobId === selectedJob.id ? 'Queued…' : 'Re-run'}
@@ -3055,7 +3162,7 @@ function App() {
             <DetailBlock
               label="Superseded by"
               value={
-                <button type="button" className="drawer-inline-action" onClick={() => setSelectedJobId(selectedJobLatestAttempt.id)}>
+                <button type="button" className="drawer-inline-action" onClick={() => selectJob(selectedJobLatestAttempt.id)}>
                   {shortId(selectedJobLatestAttempt.id)} · {formatTime(selectedJobLatestAttempt.created_at)}
                 </button>
               }
@@ -3079,7 +3186,7 @@ function App() {
                         key={attempt.id}
                         type="button"
                         className={attempt.id === selectedJob.id ? 'attempt-history-item active' : 'attempt-history-item'}
-                        onClick={() => setSelectedJobId(attempt.id)}
+                        onClick={() => selectJob(attempt.id)}
                       >
                         <span className="attempt-history-title">
                           <StatusTag value={jobDisplayStatus(attempt)} />
@@ -3144,7 +3251,7 @@ function App() {
                           <button
                             type="button"
                             className="ghost-button child-job-action"
-                            onClick={() => void rerunExistingJob(child.id)}
+                            onClick={() => void rerunExistingJob(child.id, child)}
                             disabled={rerunningJobId === child.id}
                           >
                             {rerunningJobId === child.id ? 'Queued…' : 'Re-run'}
@@ -3353,7 +3460,7 @@ function App() {
         rows={jobRows}
         rowKey="id"
         selectedKey={selectedJobId}
-        onSelectedKeyChange={setSelectedJobId}
+        onSelectedKeyChange={selectJob}
         onDisplayedKeysChange={handleDisplayedKeysChange}
         quickSearch={deferredTableSearch}
         persistenceId="papertorepo-jobs"

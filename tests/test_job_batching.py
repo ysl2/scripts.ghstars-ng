@@ -416,6 +416,8 @@ def test_rerun_api_supports_latest_batch_child_jobs(db_env):
     assert child_response.status_code == 200
     assert child_response.json()["job_type"] == JobType.sync_papers.value
     assert child_response.json()["parent_job_id"] == rerun_batch_id
+    assert child_response.json()["attempt_count"] == 3
+    assert child_response.json()["attempt_rank"] == 1
 
     assert latest_children_response.status_code == 200
     latest_children = latest_children_response.json()

@@ -355,7 +355,8 @@ def register_routes(app: FastAPI) -> None:
     @router.post("/jobs/{job_id}/rerun", response_model=JobRead)
     def rerun_existing_job(job_id: str, db: Session = Depends(get_db)) -> JobRead:
         try:
-            return serialize_job(db, rerun_job(db, job_id))
+            job = rerun_job(db, job_id)
+            return serialize_job(db, job, attempt_meta=get_job_attempt_meta(db, job))
         except LookupError as exc:
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
         except RuntimeError as exc:
