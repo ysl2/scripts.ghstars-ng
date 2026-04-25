@@ -9,6 +9,7 @@ from papertorepo.api.app import app, create_app
 from papertorepo.core.config import clear_settings_cache
 from papertorepo.db.session import session_scope
 from papertorepo.db.models import (
+    GitHubRepo,
     Job,
     JobAttemptMode,
     JobItemResumeProgress,
@@ -58,6 +59,24 @@ def test_public_papers_returns_summary_rows(db_env):
                 last_attempt_error=None,
             )
         )
+        db.add(
+            GitHubRepo(
+                normalized_github_url="https://github.com/example/project",
+                github_id=123,
+                owner="example",
+                repo="project",
+                stars=321,
+                created_at="2020-01-01T00:00:00Z",
+                description="example project",
+                homepage=None,
+                topics_json=[],
+                license=None,
+                archived=False,
+                pushed_at="2026-04-18T00:00:00Z",
+                first_seen_at=utc_now(),
+                checked_at=utc_now(),
+            )
+        )
 
     with TestClient(app) as client:
         response = client.get("/api/v1/papers?limit=10")
@@ -69,10 +88,52 @@ def test_public_papers_returns_summary_rows(db_env):
     assert row["arxiv_id"] == "2604.15312"
     assert row["title"] == "Bidirectional Cross-Modal Prompting"
     assert row["primary_repo_url"] == "https://github.com/example/project"
+    assert row["primary_repo_stars"] == 321
     assert row["link_status"] == "found"
     assert "abstract" not in row
     assert row["comment"] == "CVPR 2026"
     assert "repo_urls" not in row
+
+
+def test_public_papers_returns_null_primary_repo_stars_without_metadata(db_env):
+    with session_scope() as db:
+        db.add(
+            Paper(
+                arxiv_id="2604.15313",
+                abs_url="https://arxiv.org/abs/2604.15313",
+                title="Missing repo metadata",
+                abstract="Long abstract body",
+                published_at=at_utc_midnight(date(2026, 4, 16)),
+                updated_at=at_utc_midnight(date(2026, 4, 16)),
+                authors_json=["Alice"],
+                categories_json=["cs.CV"],
+                comment=None,
+                primary_category="cs.CV",
+                source_first_seen_at=utc_now(),
+                source_last_seen_at=utc_now(),
+            )
+        )
+        db.add(
+            PaperRepoState(
+                arxiv_id="2604.15313",
+                stable_status=RepoStableStatus.found,
+                primary_repo_url="https://github.com/missing/project",
+                repo_urls_json=["https://github.com/missing/project"],
+                stable_decided_at=utc_now(),
+                refresh_after=utc_now(),
+                last_attempt_at=utc_now(),
+                last_attempt_complete=True,
+                last_attempt_error=None,
+            )
+        )
+
+    with TestClient(app) as client:
+        response = client.get("/api/v1/papers?limit=10")
+
+    assert response.status_code == 200
+    row = response.json()[0]
+    assert row["primary_repo_url"] == "https://github.com/missing/project"
+    assert row["primary_repo_stars"] is None
 
 
 def test_public_papers_supports_offset_paging(db_env):

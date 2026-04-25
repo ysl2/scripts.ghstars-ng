@@ -1547,6 +1547,7 @@ async def _probe_alphaxiv(
     raw_fetches: dict[str, RawFetchEnvelope] = {}
     provider_counts = metrics["provider_counts"]["alphaxiv"]
     stage_seconds = metrics["stage_seconds"]
+    complete = True
 
     started = time.perf_counter()
     payload_status, payload_body, payload_headers, payload_error = await client.fetch_paper_payload(arxiv_id)
@@ -1562,6 +1563,7 @@ async def _probe_alphaxiv(
         headers=payload_headers,
     )
     if payload_error and payload_status != 404:
+        complete = False
         provider_counts["api_failures"] += 1
         observations.append(
             {
@@ -1572,7 +1574,6 @@ async def _probe_alphaxiv(
                 "raw_fetch_ref": "alphaxiv_api",
             }
         )
-        return observations, False, raw_fetches
 
     payload_urls = extract_github_url_from_alphaxiv_payload(payload_body)
     if payload_urls:
@@ -1587,18 +1588,17 @@ async def _probe_alphaxiv(
                     "raw_fetch_ref": "alphaxiv_api",
                 }
             )
-        return observations, True, raw_fetches
+        return observations, complete, raw_fetches
 
-    observations.append(
-        {
-            "provider": "alphaxiv",
-            "surface": "paper_api",
-            "status": ObservationStatus.checked_no_match,
-            "raw_fetch_ref": "alphaxiv_api",
-        }
-    )
-    if payload_status == 404:
-        return observations, True, raw_fetches
+    if not (payload_error and payload_status != 404):
+        observations.append(
+            {
+                "provider": "alphaxiv",
+                "surface": "paper_api",
+                "status": ObservationStatus.checked_no_match,
+                "raw_fetch_ref": "alphaxiv_api",
+            }
+        )
 
     started = time.perf_counter()
     html_status, html_body, html_headers, html_error = await client.fetch_paper_html(arxiv_id)
@@ -1648,7 +1648,7 @@ async def _probe_alphaxiv(
                 "raw_fetch_ref": "alphaxiv_html",
             }
         )
-    return observations, True, raw_fetches
+    return observations, complete, raw_fetches
 
 
 def _resolve_observation_raw_refs(
@@ -1903,11 +1903,15 @@ async def run_find_repos(
                         paper = db.get(Paper, result.arxiv_id)
                         if paper is not None and _link_lookup_due(paper.repo_state, force=force):
                             state = _persist_link_lookup_result(db, paper=paper, result=result)
-                            if result.complete:
+                            result_urls = _finalize_repo_urls(result.observations)
+                            resume_completed = bool(result_urls) or (
+                                result.complete and state.stable_status == RepoStableStatus.not_found
+                            )
+                            if resume_completed:
                                 _record_resume_item_completed(db, resume_context, result.arxiv_id)
                             db.commit()
                             stats["papers_processed"] += 1
-                            if result.complete:
+                            if resume_completed:
                                 stats["resume_items_completed"] += 1
                             stats[state.stable_status.value] += 1
                         elif paper is not None:

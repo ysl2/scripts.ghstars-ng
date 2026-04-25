@@ -15,9 +15,11 @@ from papertorepo.db.models import (
     JobAttemptMode,
     JobItemResumeProgress,
     JobType,
+    ObservationStatus,
     Paper,
     PaperRepoState,
     RawFetch,
+    RepoObservation,
     RepoStableStatus,
     utc_now,
 )
@@ -115,10 +117,23 @@ async def test_find_repos_preserves_previous_found_state_after_incomplete_lookup
     monkeypatch.setattr("papertorepo.services.pipeline.AlphaXivLinksClient", FakeAlphaXivClient)
 
     with session_scope() as db:
-        await run_find_repos(db, {"categories": ["cs.CV"], "month": "2026-04"})
+        stats = await run_find_repos(
+            db,
+            {"categories": ["cs.CV"], "month": "2026-04"},
+            job_id="incomplete-preserve",
+            attempt_series_key="incomplete-preserve-series",
+            attempt_mode=JobAttemptMode.fresh,
+        )
+        assert stats["resume_items_completed"] == 0
 
     with session_scope() as db:
         state = db.get(PaperRepoState, "2604.12345")
+        resume_item = db.scalar(
+            select(JobItemResumeProgress).where(
+                JobItemResumeProgress.attempt_series_key == "incomplete-preserve-series",
+                JobItemResumeProgress.item_key == "2604.12345",
+            )
+        )
         assert state is not None
         assert state.stable_status == RepoStableStatus.found
         assert state.primary_repo_url == "https://github.com/foo/bar"
@@ -126,17 +141,20 @@ async def test_find_repos_preserves_previous_found_state_after_incomplete_lookup
         assert state.refresh_after.replace(tzinfo=timezone.utc) == expired_refresh_after
         assert state.last_attempt_complete is False
         assert "Hugging Face lookup incomplete" in (state.last_attempt_error or "")
+        assert resume_item is None
 
 
 @pytest.mark.anyio
 async def test_find_repos_marks_not_found_only_after_complete_lookup(db_env, monkeypatch):
     insert_paper()
+    calls: list[str] = []
 
     class FakeHuggingFaceClient:
         def __init__(self, *_args, **_kwargs):
             pass
 
         async def fetch_paper_payload(self, _arxiv_id):
+            calls.append("hf_api")
             return 404, "", {"Content-Type": "application/json"}, None
 
     class FakeAlphaXivClient:
@@ -144,10 +162,12 @@ async def test_find_repos_marks_not_found_only_after_complete_lookup(db_env, mon
             pass
 
         async def fetch_paper_payload(self, _arxiv_id):
+            calls.append("alphaxiv_api")
             return 404, "", {"Content-Type": "application/json"}, None
 
         async def fetch_paper_html(self, _arxiv_id):
-            raise AssertionError("404 payload should short-circuit html fallback")
+            calls.append("alphaxiv_html")
+            return 404, "", {"Content-Type": "text/html"}, None
 
     monkeypatch.setattr("papertorepo.services.pipeline.HuggingFaceLinksClient", FakeHuggingFaceClient)
     monkeypatch.setattr("papertorepo.services.pipeline.AlphaXivLinksClient", FakeAlphaXivClient)
@@ -155,6 +175,7 @@ async def test_find_repos_marks_not_found_only_after_complete_lookup(db_env, mon
     with session_scope() as db:
         stats = await run_find_repos(db, {"categories": ["cs.CV"], "month": "2026-04"})
         assert stats["not_found"] == 1
+        assert stats["provider_counts"]["alphaxiv"]["html_requests"] == 1
 
     with session_scope() as db:
         state = db.get(PaperRepoState, "2604.12345")
@@ -162,6 +183,144 @@ async def test_find_repos_marks_not_found_only_after_complete_lookup(db_env, mon
         assert state.stable_status == RepoStableStatus.not_found
         assert state.refresh_after is not None
         assert state.last_attempt_complete is True
+
+    assert calls == ["alphaxiv_api", "alphaxiv_html", "hf_api"]
+
+
+@pytest.mark.anyio
+async def test_find_repos_alphaxiv_api_404_continues_to_html_and_finds_repo(db_env, monkeypatch):
+    insert_paper()
+    calls: list[str] = []
+
+    class FakeHuggingFaceClient:
+        def __init__(self, *_args, **_kwargs):
+            pass
+
+        async def fetch_paper_payload(self, _arxiv_id):
+            raise AssertionError("huggingface should be skipped after alphaxiv html finds a repo")
+
+    class FakeAlphaXivClient:
+        def __init__(self, *_args, **_kwargs):
+            pass
+
+        async def fetch_paper_payload(self, _arxiv_id):
+            calls.append("alphaxiv_api")
+            return 404, "", {"Content-Type": "application/json"}, None
+
+        async def fetch_paper_html(self, _arxiv_id):
+            calls.append("alphaxiv_html")
+            return (
+                200,
+                'resources:{github:{url:"https://github.com/foo/from-html"}}',
+                {"Content-Type": "text/html"},
+                None,
+            )
+
+    monkeypatch.setattr("papertorepo.services.pipeline.HuggingFaceLinksClient", FakeHuggingFaceClient)
+    monkeypatch.setattr("papertorepo.services.pipeline.AlphaXivLinksClient", FakeAlphaXivClient)
+
+    with session_scope() as db:
+        stats = await run_find_repos(db, {"categories": ["cs.CV"], "month": "2026-04"})
+
+    assert calls == ["alphaxiv_api", "alphaxiv_html"]
+    assert stats["found"] == 1
+    assert stats["provider_counts"]["alphaxiv"]["api_requests"] == 1
+    assert stats["provider_counts"]["alphaxiv"]["html_requests"] == 1
+
+    with session_scope() as db:
+        state = db.get(PaperRepoState, "2604.12345")
+        observations = list(
+            db.scalars(
+                select(RepoObservation).where(RepoObservation.arxiv_id == "2604.12345").order_by(RepoObservation.id)
+            )
+        )
+
+    assert state is not None
+    assert state.stable_status == RepoStableStatus.found
+    assert state.primary_repo_url == "https://github.com/foo/from-html"
+    assert state.refresh_after is not None
+    assert state.last_attempt_complete is True
+    assert [(item.provider, item.surface, item.status) for item in observations] == [
+        ("arxiv", "comment", ObservationStatus.checked_no_match),
+        ("arxiv", "abstract", ObservationStatus.checked_no_match),
+        ("alphaxiv", "paper_api", ObservationStatus.checked_no_match),
+        ("alphaxiv", "paper_html", ObservationStatus.found),
+    ]
+
+
+@pytest.mark.anyio
+async def test_find_repos_alphaxiv_api_error_continues_to_html_found_and_records_resume(db_env, monkeypatch):
+    insert_paper()
+    calls: list[str] = []
+
+    class FakeHuggingFaceClient:
+        def __init__(self, *_args, **_kwargs):
+            pass
+
+        async def fetch_paper_payload(self, _arxiv_id):
+            raise AssertionError("huggingface should be skipped after alphaxiv html finds a repo")
+
+    class FakeAlphaXivClient:
+        def __init__(self, *_args, **_kwargs):
+            pass
+
+        async def fetch_paper_payload(self, _arxiv_id):
+            calls.append("alphaxiv_api")
+            return 500, None, {}, "alphaxiv api unavailable"
+
+        async def fetch_paper_html(self, _arxiv_id):
+            calls.append("alphaxiv_html")
+            return (
+                200,
+                'implementation:"https://github.com/foo/html-after-api-error"',
+                {"Content-Type": "text/html"},
+                None,
+            )
+
+    monkeypatch.setattr("papertorepo.services.pipeline.HuggingFaceLinksClient", FakeHuggingFaceClient)
+    monkeypatch.setattr("papertorepo.services.pipeline.AlphaXivLinksClient", FakeAlphaXivClient)
+
+    with session_scope() as db:
+        stats = await run_find_repos(
+            db,
+            {"categories": ["cs.CV"], "month": "2026-04"},
+            job_id="alphaxiv-error-html-found",
+            attempt_series_key="alphaxiv-error-html-found-series",
+            attempt_mode=JobAttemptMode.fresh,
+        )
+
+    assert calls == ["alphaxiv_api", "alphaxiv_html"]
+    assert stats["found"] == 1
+    assert stats["resume_items_completed"] == 1
+    assert stats["provider_counts"]["alphaxiv"]["api_failures"] == 1
+
+    with session_scope() as db:
+        state = db.get(PaperRepoState, "2604.12345")
+        resume_item = db.scalar(
+            select(JobItemResumeProgress).where(
+                JobItemResumeProgress.attempt_series_key == "alphaxiv-error-html-found-series",
+                JobItemResumeProgress.item_key == "2604.12345",
+            )
+        )
+        observations = list(
+            db.scalars(
+                select(RepoObservation).where(RepoObservation.arxiv_id == "2604.12345").order_by(RepoObservation.id)
+            )
+        )
+
+    assert state is not None
+    assert state.stable_status == RepoStableStatus.found
+    assert state.primary_repo_url == "https://github.com/foo/html-after-api-error"
+    assert state.refresh_after is not None
+    assert state.last_attempt_complete is False
+    assert "AlphaXiv lookup incomplete" in (state.last_attempt_error or "")
+    assert resume_item is not None
+    assert [(item.provider, item.surface, item.status) for item in observations] == [
+        ("arxiv", "comment", ObservationStatus.checked_no_match),
+        ("arxiv", "abstract", ObservationStatus.checked_no_match),
+        ("alphaxiv", "paper_api", ObservationStatus.fetch_failed),
+        ("alphaxiv", "paper_html", ObservationStatus.found),
+    ]
 
 
 @pytest.mark.anyio
@@ -261,6 +420,15 @@ async def test_find_repos_repair_does_not_reuse_incomplete_paper_items(db_env, m
                 attempt_series_key="find-incomplete-series",
                 attempt_mode=JobAttemptMode.fresh,
             )
+
+    with session_scope() as db:
+        incomplete_resume_item = db.scalar(
+            select(JobItemResumeProgress).where(
+                JobItemResumeProgress.attempt_series_key == "find-incomplete-series",
+                JobItemResumeProgress.item_key == "2604.00502",
+            )
+        )
+    assert incomplete_resume_item is None
 
     phase = "repair"
     with session_scope() as db:

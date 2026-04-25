@@ -221,6 +221,7 @@ class PaperSummaryRead(BaseModel):
     comment: str | None
     link_status: RepoStableStatus
     primary_repo_url: str | None
+    primary_repo_stars: int | None
     stable_decided_at: datetime | None
     refresh_after: datetime | None
     last_attempt_at: datetime | None

@@ -67,7 +67,7 @@ def _scope_from_query(
     )
 
 
-def _paper_summary_payload(paper: Paper) -> dict[str, object]:
+def _paper_summary_payload(paper: Paper, *, primary_repo_stars: int | None = None) -> dict[str, object]:
     state = paper.repo_state
     return {
         "arxiv_id": paper.arxiv_id,
@@ -81,6 +81,7 @@ def _paper_summary_payload(paper: Paper) -> dict[str, object]:
         "comment": paper.comment,
         "link_status": state.stable_status if state is not None else RepoStableStatus.unknown,
         "primary_repo_url": state.primary_repo_url if state is not None else None,
+        "primary_repo_stars": primary_repo_stars,
         "stable_decided_at": state.stable_decided_at if state is not None else None,
         "refresh_after": state.refresh_after if state is not None else None,
         "last_attempt_at": state.last_attempt_at if state is not None else None,
@@ -89,14 +90,14 @@ def _paper_summary_payload(paper: Paper) -> dict[str, object]:
     }
 
 
-def serialize_paper_summary(paper: Paper) -> PaperSummaryRead:
-    return PaperSummaryRead(**_paper_summary_payload(paper))
+def serialize_paper_summary(paper: Paper, *, primary_repo_stars: int | None = None) -> PaperSummaryRead:
+    return PaperSummaryRead(**_paper_summary_payload(paper, primary_repo_stars=primary_repo_stars))
 
 
-def serialize_paper(paper: Paper) -> PaperRead:
+def serialize_paper(paper: Paper, *, primary_repo_stars: int | None = None) -> PaperRead:
     state = paper.repo_state
     return PaperRead(
-        **_paper_summary_payload(paper),
+        **_paper_summary_payload(paper, primary_repo_stars=primary_repo_stars),
         abstract=paper.abstract,
         doi=paper.doi,
         journal_ref=paper.journal_ref,
@@ -257,7 +258,27 @@ def register_routes(app: FastAPI) -> None:
             offset=offset,
             limit=limit,
         )
-        rows = [serialize_paper_summary(paper) for paper in papers]
+        primary_repo_urls = {
+            paper.repo_state.primary_repo_url
+            for paper in papers
+            if paper.repo_state is not None and paper.repo_state.primary_repo_url is not None
+        }
+        stars_by_url = dict(
+            db.execute(
+                select(GitHubRepo.normalized_github_url, GitHubRepo.stars).where(
+                    GitHubRepo.normalized_github_url.in_(primary_repo_urls)
+                )
+            ).all()
+        )
+        rows = [
+            serialize_paper_summary(
+                paper,
+                primary_repo_stars=stars_by_url.get(paper.repo_state.primary_repo_url)
+                if paper.repo_state is not None and paper.repo_state.primary_repo_url is not None
+                else None,
+            )
+            for paper in papers
+        ]
         if status_filter is not None:
             rows = [paper for paper in rows if paper.link_status == status_filter]
         return rows
@@ -267,7 +288,9 @@ def register_routes(app: FastAPI) -> None:
         paper = db.scalar(select(Paper).options(selectinload(Paper.repo_state)).where(Paper.arxiv_id == arxiv_id))
         if paper is None:
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Paper not found")
-        return serialize_paper(paper)
+        primary_repo_url = paper.repo_state.primary_repo_url if paper.repo_state is not None else None
+        repo = db.get(GitHubRepo, primary_repo_url) if primary_repo_url is not None else None
+        return serialize_paper(paper, primary_repo_stars=repo.stars if repo is not None else None)
 
     @router.get("/repos", response_model=list[RepoRead])
     def public_repos(

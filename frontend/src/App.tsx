@@ -126,6 +126,7 @@ type PaperSummary = {
   comment: string | null
   link_status: LinkStatus
   primary_repo_url: string | null
+  primary_repo_stars: number | null
   stable_decided_at: string | null
   refresh_after: string | null
   last_attempt_at: string | null
@@ -2310,7 +2311,6 @@ function App() {
   const paperRows = useMemo(
     () =>
       papers.map((paper) => {
-        const repo = paper.primary_repo_url ? repoByUrl[paper.primary_repo_url] : undefined
         return {
           id: paper.arxiv_id,
           link_status: paper.link_status,
@@ -2324,7 +2324,7 @@ function App() {
           comment: paper.comment || '',
           repo_label: paper.primary_repo_url ? repoLabel(paper.primary_repo_url) : '',
           repo_url: paper.primary_repo_url || '',
-          repo_stars: repo?.stars ?? null,
+          repo_stars: paper.primary_repo_stars,
           refresh_after: paper.refresh_after || '',
           search_blob: [
             paper.arxiv_id,
@@ -2339,7 +2339,7 @@ function App() {
             .trim(),
         }
       }),
-    [papers, repoByUrl],
+    [papers],
   )
 
   const jobRows = useMemo(
