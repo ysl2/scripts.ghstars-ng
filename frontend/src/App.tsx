@@ -1356,11 +1356,12 @@ function JobChildrenChevronCellRenderer({ data, onToggleChildren }: JobChildrenC
   const busy = data.children_loading === true
   const expanded = data.children_expanded === true
   const label = busy ? 'Loading child jobs' : expanded ? 'Collapse child jobs' : 'Expand child jobs'
+  const toggleClassName = ['job-tree-toggle', expanded ? 'expanded' : '', busy ? 'loading' : ''].filter(Boolean).join(' ')
 
   return (
     <button
       type="button"
-      className={busy ? 'job-tree-toggle loading' : expanded ? 'job-tree-toggle expanded' : 'job-tree-toggle'}
+      className={toggleClassName}
       data-grid-action="true"
       aria-label={label}
       aria-busy={busy}
@@ -1403,11 +1404,12 @@ function JobHistoryChevronCellRenderer({ data, onToggleHistory }: JobHistoryChev
   const expanded = data.history_expanded === true
   const attemptCount = typeof data.attempt_count === 'number' ? data.attempt_count : null
   const label = busy ? 'Loading history' : expanded ? `Collapse ${attemptCount ?? ''} attempts`.trim() : `Expand ${attemptCount ?? ''} attempts`.trim()
+  const toggleClassName = ['job-history-toggle', expanded ? 'expanded' : '', busy ? 'loading' : ''].filter(Boolean).join(' ')
 
   return (
     <button
       type="button"
-      className={busy ? 'job-history-toggle loading' : expanded ? 'job-history-toggle expanded' : 'job-history-toggle'}
+      className={toggleClassName}
       data-grid-action="true"
       aria-label={label}
       aria-busy={busy}
