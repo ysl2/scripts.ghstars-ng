@@ -166,6 +166,31 @@ class SyncPapersArxivRequestCheckpoint(Base):
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
 
 
+class JobItemResumeProgress(Base):
+    __tablename__ = "job_item_resume_progress"
+    __table_args__ = (
+        Index(
+            "ix_job_item_resume_progress_item",
+            "attempt_series_key",
+            "job_type",
+            "item_kind",
+            "item_key",
+            unique=True,
+        ),
+        Index("ix_job_item_resume_progress_source_job", "source_job_id"),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
+    attempt_series_key: Mapped[str] = mapped_column(String(36))
+    job_type: Mapped[str] = mapped_column(String(64))
+    item_kind: Mapped[str] = mapped_column(String(32))
+    item_key: Mapped[str] = mapped_column(String(1024))
+    status: Mapped[str] = mapped_column(String(32))
+    source_job_id: Mapped[str | None] = mapped_column(ForeignKey("jobs.id", ondelete="SET NULL"), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+
+
 class RepoObservation(Base):
     __tablename__ = "repo_observations"
     __table_args__ = (

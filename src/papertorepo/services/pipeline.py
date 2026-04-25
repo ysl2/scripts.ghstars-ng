@@ -46,6 +46,7 @@ from papertorepo.db.models import (
     GitHubRepo,
     Job,
     JobAttemptMode,
+    JobItemResumeProgress,
     JobStatus,
     JobType,
     ObservationStatus,
@@ -72,6 +73,9 @@ SYNC_PAPERS_ARXIV_MAX_CONCURRENT = 1
 SYNC_PAPERS_ARXIV_LIST_ABS_LINK_PATTERN = re.compile(r'href\s*=\s*"/abs/([^"#?]+)"', re.IGNORECASE)
 REFRESH_METADATA_GITHUB_GRAPHQL_MAX_CONCURRENT = 1
 REFRESH_METADATA_GITHUB_GRAPHQL_TOPICS_FIRST = 20
+RESUME_ITEM_STATUS_COMPLETED = "completed"
+RESUME_ITEM_KIND_PAPER = "paper"
+RESUME_ITEM_KIND_REPO = "repo"
 _SYNC_PAPERS_ARXIV_RATE_LIMITERS: weakref.WeakKeyDictionary[asyncio.AbstractEventLoop, dict[float, RateLimiter]] = (
     weakref.WeakKeyDictionary()
 )
@@ -100,6 +104,29 @@ class SyncPapersCheckpointContext:
     def can_reuse(self) -> bool:
         attempt_mode = self.attempt_mode.value if isinstance(self.attempt_mode, JobAttemptMode) else str(self.attempt_mode)
         return self.attempt_series_key is not None and attempt_mode == JobAttemptMode.repair.value
+
+    @property
+    def can_store(self) -> bool:
+        return self.attempt_series_key is not None
+
+
+@dataclass(frozen=True, slots=True)
+class ItemResumeContext:
+    job_id: str | None
+    attempt_series_key: str | None
+    attempt_mode: JobAttemptMode | str
+    job_type: JobType | str
+    item_kind: str
+    force: bool = False
+
+    @property
+    def job_type_value(self) -> str:
+        return self.job_type.value if isinstance(self.job_type, JobType) else str(self.job_type)
+
+    @property
+    def can_reuse(self) -> bool:
+        attempt_mode = self.attempt_mode.value if isinstance(self.attempt_mode, JobAttemptMode) else str(self.attempt_mode)
+        return self.attempt_series_key is not None and attempt_mode == JobAttemptMode.repair.value and not self.force
 
     @property
     def can_store(self) -> bool:
@@ -608,6 +635,50 @@ def _record_sync_papers_checkpoint_reuse(stats: dict[str, Any], surface: str) ->
         stats["checkpoint_metadata_batches_reused"] += 1
     else:
         stats["checkpoint_pages_reused"] += 1
+
+
+def _completed_resume_item_keys(db: Session, context: ItemResumeContext) -> set[str]:
+    if not context.can_reuse:
+        return set()
+    return set(
+        db.scalars(
+            select(JobItemResumeProgress.item_key).where(
+                JobItemResumeProgress.attempt_series_key == context.attempt_series_key,
+                JobItemResumeProgress.job_type == context.job_type_value,
+                JobItemResumeProgress.item_kind == context.item_kind,
+                JobItemResumeProgress.status == RESUME_ITEM_STATUS_COMPLETED,
+            )
+        ).all()
+    )
+
+
+def _record_resume_item_completed(db: Session, context: ItemResumeContext, item_key: str) -> None:
+    if not context.can_store:
+        return
+    now = utc_now()
+    source_job_id = context.job_id if context.job_id is not None and db.get(Job, context.job_id) is not None else None
+    progress = db.scalar(
+        select(JobItemResumeProgress).where(
+            JobItemResumeProgress.attempt_series_key == context.attempt_series_key,
+            JobItemResumeProgress.job_type == context.job_type_value,
+            JobItemResumeProgress.item_kind == context.item_kind,
+            JobItemResumeProgress.item_key == item_key,
+        )
+    )
+    if progress is None:
+        progress = JobItemResumeProgress(
+            attempt_series_key=str(context.attempt_series_key),
+            job_type=context.job_type_value,
+            item_kind=context.item_kind,
+            item_key=item_key,
+            status=RESUME_ITEM_STATUS_COMPLETED,
+            created_at=now,
+        )
+        db.add(progress)
+    progress.status = RESUME_ITEM_STATUS_COMPLETED
+    progress.source_job_id = source_job_id
+    progress.updated_at = now
+    db.flush()
 
 
 def _load_sync_papers_arxiv_checkpoint(
@@ -1726,6 +1797,9 @@ async def run_find_repos(
     db: Session,
     scope_json: dict[str, Any],
     *,
+    job_id: str | None = None,
+    attempt_series_key: str | None = None,
+    attempt_mode: JobAttemptMode | str = JobAttemptMode.fresh,
     progress: ProgressCallback | None = None,
     stop_check: StopCheck | None = None,
 ) -> dict[str, Any]:
@@ -1735,13 +1809,26 @@ async def run_find_repos(
     _required_scope_window(scope_json)
     papers = scoped_papers(db, scope_json)
     force = bool(scope_json.get("force"))
-    due_papers = [paper for paper in papers if _link_lookup_due(paper.repo_state, force=force)]
+    resume_context = ItemResumeContext(
+        job_id=job_id,
+        attempt_series_key=attempt_series_key,
+        attempt_mode=attempt_mode,
+        job_type=JobType.find_repos,
+        item_kind=RESUME_ITEM_KIND_PAPER,
+        force=force,
+    )
+    completed_resume_keys = _completed_resume_item_keys(db, resume_context)
+    resume_reused_keys = {paper.arxiv_id for paper in papers if paper.arxiv_id in completed_resume_keys}
+    candidate_papers = [paper for paper in papers if paper.arxiv_id not in completed_resume_keys]
+    due_papers = [paper for paper in candidate_papers if _link_lookup_due(paper.repo_state, force=force)]
     metrics = _new_find_repos_metrics()
     stats = {
         "papers_considered": len(papers),
         "papers_processed": 0,
-        "papers_skipped_fresh": len(papers) - len(due_papers),
+        "papers_skipped_fresh": len(candidate_papers) - len(due_papers),
         "papers_skipped_no_longer_due": 0,
+        "resume_items_reused": len(resume_reused_keys),
+        "resume_items_completed": 0,
         "found": 0,
         "not_found": 0,
         "ambiguous": 0,
@@ -1816,8 +1903,12 @@ async def run_find_repos(
                         paper = db.get(Paper, result.arxiv_id)
                         if paper is not None and _link_lookup_due(paper.repo_state, force=force):
                             state = _persist_link_lookup_result(db, paper=paper, result=result)
+                            if result.complete:
+                                _record_resume_item_completed(db, resume_context, result.arxiv_id)
                             db.commit()
                             stats["papers_processed"] += 1
+                            if result.complete:
+                                stats["resume_items_completed"] += 1
                             stats[state.stable_status.value] += 1
                         elif paper is not None:
                             stats["papers_skipped_no_longer_due"] += 1
@@ -2128,6 +2219,9 @@ async def run_refresh_metadata(
     db: Session,
     scope_json: dict[str, Any],
     *,
+    job_id: str | None = None,
+    attempt_series_key: str | None = None,
+    attempt_mode: JobAttemptMode | str = JobAttemptMode.fresh,
     progress: ProgressCallback | None = None,
     stop_check: StopCheck | None = None,
 ) -> dict[str, Any]:
@@ -2141,11 +2235,24 @@ async def run_refresh_metadata(
         if paper.repo_state is None:
             continue
         repo_urls.update(paper.repo_state.repo_urls_json or [])
+    resume_context = ItemResumeContext(
+        job_id=job_id,
+        attempt_series_key=attempt_series_key,
+        attempt_mode=attempt_mode,
+        job_type=JobType.refresh_metadata,
+        item_kind=RESUME_ITEM_KIND_REPO,
+        force=bool(scope_json.get("force")),
+    )
+    completed_resume_keys = _completed_resume_item_keys(db, resume_context)
+    resume_reused_keys = {url for url in repo_urls if url in completed_resume_keys}
+    repo_urls_to_process = repo_urls - resume_reused_keys
 
     metrics = _new_refresh_metadata_metrics()
     stats = {
         "repos_considered": len(repo_urls),
         "repos_completed": 0,
+        "resume_items_reused": len(resume_reused_keys),
+        "resume_items_completed": 0,
         "updated": 0,
         "not_modified": 0,
         "missing": 0,
@@ -2155,6 +2262,8 @@ async def run_refresh_metadata(
     }
     _update_runtime_stats(stats, started_at=started_at, processed_key="repos_completed", throughput_key="repos_per_minute")
     _emit_progress(progress, stats)
+    if not repo_urls_to_process:
+        return stats
     min_interval = (
         settings.refresh_metadata_github_min_interval
         if settings.github_token.strip()
@@ -2171,7 +2280,7 @@ async def run_refresh_metadata(
         graphql_semaphore = asyncio.Semaphore(REFRESH_METADATA_GITHUB_GRAPHQL_MAX_CONCURRENT)
         fallback_urls: list[str] = []
 
-        sorted_urls = sorted(repo_urls)
+        sorted_urls = sorted(repo_urls_to_process)
         if settings.github_token.strip():
             for batch in _chunked(sorted_urls, settings.refresh_metadata_github_graphql_batch_size):
                 _run_stop_check(stop_check)
@@ -2211,10 +2320,12 @@ async def run_refresh_metadata(
                         persist_started = time.perf_counter()
                         now = utc_now()
                         _upsert_github_repo_from_metadata(db, normalized_url=normalized_url, metadata=metadata, now=now)
+                        _record_resume_item_completed(db, resume_context, normalized_url)
                         db.commit()
                         stats["stage_seconds"]["persist"] += time.perf_counter() - persist_started
                         stats["updated"] += 1
                         stats["repos_completed"] += 1
+                        stats["resume_items_completed"] += 1
                         _update_runtime_stats(
                             stats,
                             started_at=started_at,
@@ -2270,8 +2381,10 @@ async def run_refresh_metadata(
                 if status == "not_modified":
                     if existing is not None:
                         existing.checked_at = now
+                    _record_resume_item_completed(db, resume_context, normalized_url)
                     stats["not_modified"] += 1
                     stats["repos_completed"] += 1
+                    stats["resume_items_completed"] += 1
                     db.commit()
                     stats["stage_seconds"]["persist"] += time.perf_counter() - persist_started
                     _update_runtime_stats(
@@ -2285,8 +2398,10 @@ async def run_refresh_metadata(
                 if status == "missing":
                     if existing is not None:
                         existing.checked_at = now
+                    _record_resume_item_completed(db, resume_context, normalized_url)
                     stats["missing"] += 1
                     stats["repos_completed"] += 1
+                    stats["resume_items_completed"] += 1
                     db.commit()
                     stats["stage_seconds"]["persist"] += time.perf_counter() - persist_started
                     _update_runtime_stats(
@@ -2307,10 +2422,12 @@ async def run_refresh_metadata(
                     now=now,
                     headers=headers,
                 )
+                _record_resume_item_completed(db, resume_context, normalized_url)
                 db.commit()
                 stats["stage_seconds"]["persist"] += time.perf_counter() - persist_started
                 stats["updated"] += 1
                 stats["repos_completed"] += 1
+                stats["resume_items_completed"] += 1
                 _update_runtime_stats(
                     stats,
                     started_at=started_at,

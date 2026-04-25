@@ -6,7 +6,14 @@ import pytest
 
 from papertorepo.jobs.queue import claim_next_job, create_job, process_job, serialize_job
 from papertorepo.db.session import session_scope
-from papertorepo.db.models import Job, JobAttemptMode, JobStatus, JobType, SyncPapersArxivRequestCheckpoint
+from papertorepo.db.models import (
+    Job,
+    JobAttemptMode,
+    JobItemResumeProgress,
+    JobStatus,
+    JobType,
+    SyncPapersArxivRequestCheckpoint,
+)
 from papertorepo.api.schemas import ScopePayload
 from papertorepo.services.pipeline import run_sync_papers
 
@@ -234,6 +241,44 @@ def test_serialize_pending_sync_papers_repair_includes_resume_summary(db_env):
     assert serialized.repair_resume_json["checkpoints"]["by_surface"] == {
         "id_list_feed": 1,
         "listing_html": 1,
+    }
+
+
+def test_serialize_pending_find_repos_repair_includes_item_resume_summary(db_env):
+    scope = ScopePayload(categories=["cs.CV"], month="2026-04")
+    with session_scope() as db:
+        failed = create_job(db, JobType.find_repos, scope)
+        failed.status = JobStatus.failed
+        failed.stats_json = {"papers_processed": 1, "resume_items_completed": 1}
+        failed.error_text = "hf exploded"
+        failed.finished_at = datetime(2026, 4, 24, 11, 31, 33, tzinfo=timezone.utc)
+        db.add(
+            JobItemResumeProgress(
+                attempt_series_key=failed.attempt_series_key,
+                job_type=JobType.find_repos,
+                item_kind="paper",
+                item_key="2604.00001",
+                status="completed",
+                source_job_id=failed.id,
+            )
+        )
+        repair = create_job(
+            db,
+            JobType.find_repos,
+            scope,
+            attempt_mode=JobAttemptMode.repair,
+            attempt_series_key=failed.attempt_series_key,
+        )
+        db.commit()
+
+        serialized = serialize_job(db, repair)
+
+    assert serialized.repair_resume_json is not None
+    assert serialized.repair_resume_json["previous_job_id"] == failed.id
+    assert serialized.repair_resume_json["resume_items"] == {
+        "total": 1,
+        "item_kind": "paper",
+        "by_status": {"completed": 1},
     }
 
 

@@ -9,7 +9,18 @@ from sqlalchemy import select
 
 from papertorepo.core.config import clear_settings_cache
 from papertorepo.db.session import session_scope
-from papertorepo.db.models import SyncPapersArxivArchiveAppearance, GitHubRepo, Paper, PaperRepoState, RawFetch, RepoStableStatus, utc_now
+from papertorepo.db.models import (
+    SyncPapersArxivArchiveAppearance,
+    GitHubRepo,
+    JobAttemptMode,
+    JobItemResumeProgress,
+    JobType,
+    Paper,
+    PaperRepoState,
+    RawFetch,
+    RepoStableStatus,
+    utc_now,
+)
 from papertorepo.services.pipeline import run_refresh_metadata, run_find_repos
 from tests.conftest import insert_paper
 
@@ -154,6 +165,174 @@ async def test_find_repos_marks_not_found_only_after_complete_lookup(db_env, mon
 
 
 @pytest.mark.anyio
+async def test_find_repos_repair_reuses_completed_paper_items(db_env, monkeypatch):
+    monkeypatch.setenv("FIND_REPOS_WORKER_CONCURRENCY", "1")
+    monkeypatch.setenv("FIND_REPOS_ALPHAXIV_ENABLED", "false")
+    clear_settings_cache()
+    _insert_paper("2604.00001", date(2026, 4, 1))
+    _insert_paper("2604.00002", date(2026, 4, 2))
+
+    calls: list[tuple[str, str]] = []
+    phase = "fresh"
+
+    class FakeHuggingFaceClient:
+        def __init__(self, *_args, **_kwargs):
+            pass
+
+        async def fetch_paper_payload(self, arxiv_id):
+            calls.append((phase, arxiv_id))
+            if phase == "fresh" and arxiv_id == "2604.00001":
+                raise RuntimeError("hf exploded")
+            return 404, "", {"Content-Type": "application/json"}, None
+
+    class FakeAlphaXivClient:
+        def __init__(self, *_args, **_kwargs):
+            pass
+
+    monkeypatch.setattr("papertorepo.services.pipeline.HuggingFaceLinksClient", FakeHuggingFaceClient)
+    monkeypatch.setattr("papertorepo.services.pipeline.AlphaXivLinksClient", FakeAlphaXivClient)
+
+    with session_scope() as db:
+        with pytest.raises(RuntimeError, match="hf exploded"):
+            await run_find_repos(
+                db,
+                {"categories": ["cs.CV"], "month": "2026-04"},
+                job_id="fresh-find",
+                attempt_series_key="find-series",
+                attempt_mode=JobAttemptMode.fresh,
+            )
+
+    phase = "repair"
+    with session_scope() as db:
+        stats = await run_find_repos(
+            db,
+            {"categories": ["cs.CV"], "month": "2026-04"},
+            job_id="repair-find",
+            attempt_series_key="find-series",
+            attempt_mode=JobAttemptMode.repair,
+        )
+
+    assert calls == [
+        ("fresh", "2604.00002"),
+        ("fresh", "2604.00001"),
+        ("repair", "2604.00001"),
+    ]
+    assert stats["resume_items_reused"] == 1
+    assert stats["resume_items_completed"] == 1
+    assert stats["papers_processed"] == 1
+
+
+@pytest.mark.anyio
+async def test_find_repos_repair_does_not_reuse_incomplete_paper_items(db_env, monkeypatch):
+    monkeypatch.setenv("FIND_REPOS_WORKER_CONCURRENCY", "1")
+    monkeypatch.setenv("FIND_REPOS_ALPHAXIV_ENABLED", "false")
+    clear_settings_cache()
+    _insert_paper("2604.00501", date(2026, 4, 1))
+    _insert_paper("2604.00502", date(2026, 4, 2))
+
+    calls: list[tuple[str, str]] = []
+    phase = "fresh"
+
+    class FakeHuggingFaceClient:
+        def __init__(self, *_args, **_kwargs):
+            pass
+
+        async def fetch_paper_payload(self, arxiv_id):
+            calls.append((phase, arxiv_id))
+            if phase == "fresh" and arxiv_id == "2604.00501":
+                raise RuntimeError("hf exploded")
+            if phase == "fresh":
+                return 503, None, {}, "hf unavailable"
+            return 404, "", {"Content-Type": "application/json"}, None
+
+    class FakeAlphaXivClient:
+        def __init__(self, *_args, **_kwargs):
+            pass
+
+    monkeypatch.setattr("papertorepo.services.pipeline.HuggingFaceLinksClient", FakeHuggingFaceClient)
+    monkeypatch.setattr("papertorepo.services.pipeline.AlphaXivLinksClient", FakeAlphaXivClient)
+
+    with session_scope() as db:
+        with pytest.raises(RuntimeError, match="hf exploded"):
+            await run_find_repos(
+                db,
+                {"categories": ["cs.CV"], "month": "2026-04"},
+                job_id="fresh-incomplete-find",
+                attempt_series_key="find-incomplete-series",
+                attempt_mode=JobAttemptMode.fresh,
+            )
+
+    phase = "repair"
+    with session_scope() as db:
+        stats = await run_find_repos(
+            db,
+            {"categories": ["cs.CV"], "month": "2026-04"},
+            job_id="repair-incomplete-find",
+            attempt_series_key="find-incomplete-series",
+            attempt_mode=JobAttemptMode.repair,
+        )
+
+    assert calls == [
+        ("fresh", "2604.00502"),
+        ("fresh", "2604.00501"),
+        ("repair", "2604.00502"),
+        ("repair", "2604.00501"),
+    ]
+    assert stats["resume_items_reused"] == 0
+    assert stats["resume_items_completed"] == 2
+    assert stats["papers_processed"] == 2
+
+
+@pytest.mark.anyio
+async def test_find_repos_force_repair_does_not_reuse_completed_paper_items(db_env, monkeypatch):
+    monkeypatch.setenv("FIND_REPOS_WORKER_CONCURRENCY", "1")
+    monkeypatch.setenv("FIND_REPOS_ALPHAXIV_ENABLED", "false")
+    clear_settings_cache()
+    _insert_paper("2604.01001", date(2026, 4, 1))
+    _insert_paper("2604.01002", date(2026, 4, 2))
+    with session_scope() as db:
+        db.add(
+            JobItemResumeProgress(
+                attempt_series_key="force-find-series",
+                job_type=JobType.find_repos,
+                item_kind="paper",
+                item_key="2604.01001",
+                status="completed",
+            )
+        )
+
+    calls: list[str] = []
+
+    class FakeHuggingFaceClient:
+        def __init__(self, *_args, **_kwargs):
+            pass
+
+        async def fetch_paper_payload(self, arxiv_id):
+            calls.append(arxiv_id)
+            return 404, "", {"Content-Type": "application/json"}, None
+
+    class FakeAlphaXivClient:
+        def __init__(self, *_args, **_kwargs):
+            pass
+
+    monkeypatch.setattr("papertorepo.services.pipeline.HuggingFaceLinksClient", FakeHuggingFaceClient)
+    monkeypatch.setattr("papertorepo.services.pipeline.AlphaXivLinksClient", FakeAlphaXivClient)
+
+    with session_scope() as db:
+        stats = await run_find_repos(
+            db,
+            {"categories": ["cs.CV"], "month": "2026-04", "force": True},
+            job_id="force-repair-find",
+            attempt_series_key="force-find-series",
+            attempt_mode=JobAttemptMode.repair,
+        )
+
+    assert calls == ["2604.01002", "2604.01001"]
+    assert stats["resume_items_reused"] == 0
+    assert stats["papers_processed"] == 2
+
+
+@pytest.mark.anyio
 async def test_refresh_metadata_refreshes_dynamic_fields_but_keeps_created_at(db_env, monkeypatch):
     insert_paper()
 
@@ -220,6 +399,161 @@ async def test_refresh_metadata_refreshes_dynamic_fields_but_keeps_created_at(db
         assert repo.homepage == "https://example.com"
         assert repo.topics_json == ["vision", "reconstruction"]
         assert repo.license == "MIT"
+
+
+@pytest.mark.anyio
+async def test_refresh_metadata_repair_reuses_completed_repo_items(db_env, monkeypatch):
+    monkeypatch.setenv("GITHUB_TOKEN", "")
+    monkeypatch.setenv("REFRESH_METADATA_GITHUB_MIN_INTERVAL", "0")
+    clear_settings_cache()
+    monkeypatch.setattr("papertorepo.services.pipeline.REFRESH_METADATA_GITHUB_ANONYMOUS_REST_MIN_INTERVAL_SECONDS", 0.0)
+    _insert_paper("2604.02001", date(2026, 4, 1))
+    _insert_paper("2604.02002", date(2026, 4, 2))
+    with session_scope() as db:
+        db.add_all(
+            [
+                PaperRepoState(
+                    arxiv_id="2604.02001",
+                    stable_status=RepoStableStatus.found,
+                    primary_repo_url="https://github.com/foo/a",
+                    repo_urls_json=["https://github.com/foo/a"],
+                    stable_decided_at=utc_now(),
+                    refresh_after=utc_now(),
+                    last_attempt_at=utc_now(),
+                    last_attempt_complete=True,
+                ),
+                PaperRepoState(
+                    arxiv_id="2604.02002",
+                    stable_status=RepoStableStatus.found,
+                    primary_repo_url="https://github.com/foo/b",
+                    repo_urls_json=["https://github.com/foo/b"],
+                    stable_decided_at=utc_now(),
+                    refresh_after=utc_now(),
+                    last_attempt_at=utc_now(),
+                    last_attempt_complete=True,
+                ),
+            ]
+        )
+
+    calls: list[tuple[str, str]] = []
+    phase = "fresh"
+
+    async def fake_request_text(_session, url, **_kwargs):
+        calls.append((phase, url))
+        if phase == "fresh" and url.endswith("/foo/b"):
+            raise RuntimeError("github exploded")
+        repo_name = url.rsplit("/", 1)[-1]
+        payload = {
+            "id": 100 if repo_name == "a" else 200,
+            "name": repo_name,
+            "owner": {"login": "foo"},
+            "stargazers_count": 10,
+            "created_at": "2020-01-01T00:00:00Z",
+            "description": repo_name,
+            "homepage": None,
+            "topics": [],
+            "license": None,
+            "archived": False,
+            "pushed_at": "2026-04-18T00:00:00Z",
+        }
+        return 200, json.dumps(payload), {"ETag": f"etag-{repo_name}"}, None
+
+    monkeypatch.setattr("papertorepo.services.pipeline.request_text", fake_request_text)
+
+    with session_scope() as db:
+        with pytest.raises(RuntimeError, match="github exploded"):
+            await run_refresh_metadata(
+                db,
+                {"categories": ["cs.CV"], "month": "2026-04"},
+                job_id="fresh-refresh",
+                attempt_series_key="refresh-series",
+                attempt_mode=JobAttemptMode.fresh,
+            )
+
+    phase = "repair"
+    with session_scope() as db:
+        stats = await run_refresh_metadata(
+            db,
+            {"categories": ["cs.CV"], "month": "2026-04"},
+            job_id="repair-refresh",
+            attempt_series_key="refresh-series",
+            attempt_mode=JobAttemptMode.repair,
+        )
+
+    assert calls == [
+        ("fresh", "https://api.github.com/repos/foo/a"),
+        ("fresh", "https://api.github.com/repos/foo/b"),
+        ("repair", "https://api.github.com/repos/foo/b"),
+    ]
+    assert stats["resume_items_reused"] == 1
+    assert stats["resume_items_completed"] == 1
+    assert stats["repos_completed"] == 1
+
+
+@pytest.mark.anyio
+async def test_refresh_metadata_force_repair_does_not_reuse_completed_repo_items(db_env, monkeypatch):
+    monkeypatch.setenv("GITHUB_TOKEN", "")
+    monkeypatch.setenv("REFRESH_METADATA_GITHUB_MIN_INTERVAL", "0")
+    clear_settings_cache()
+    monkeypatch.setattr("papertorepo.services.pipeline.REFRESH_METADATA_GITHUB_ANONYMOUS_REST_MIN_INTERVAL_SECONDS", 0.0)
+    _insert_paper("2604.02501", date(2026, 4, 1))
+    with session_scope() as db:
+        db.add(
+            PaperRepoState(
+                arxiv_id="2604.02501",
+                stable_status=RepoStableStatus.found,
+                primary_repo_url="https://github.com/foo/force",
+                repo_urls_json=["https://github.com/foo/force"],
+                stable_decided_at=utc_now(),
+                refresh_after=utc_now(),
+                last_attempt_at=utc_now(),
+                last_attempt_complete=True,
+            )
+        )
+        db.add(
+            JobItemResumeProgress(
+                attempt_series_key="force-refresh-series",
+                job_type=JobType.refresh_metadata,
+                item_kind="repo",
+                item_key="https://github.com/foo/force",
+                status="completed",
+            )
+        )
+
+    calls: list[str] = []
+
+    async def fake_request_text(_session, url, **_kwargs):
+        calls.append(url)
+        payload = {
+            "id": 300,
+            "name": "force",
+            "owner": {"login": "foo"},
+            "stargazers_count": 30,
+            "created_at": "2020-01-01T00:00:00Z",
+            "description": "force",
+            "homepage": None,
+            "topics": [],
+            "license": None,
+            "archived": False,
+            "pushed_at": "2026-04-18T00:00:00Z",
+        }
+        return 200, json.dumps(payload), {"ETag": "etag-force"}, None
+
+    monkeypatch.setattr("papertorepo.services.pipeline.request_text", fake_request_text)
+
+    with session_scope() as db:
+        stats = await run_refresh_metadata(
+            db,
+            {"categories": ["cs.CV"], "month": "2026-04", "force": True},
+            job_id="force-repair-refresh",
+            attempt_series_key="force-refresh-series",
+            attempt_mode=JobAttemptMode.repair,
+        )
+
+    assert calls == ["https://api.github.com/repos/foo/force"]
+    assert stats["resume_items_reused"] == 0
+    assert stats["resume_items_completed"] == 1
+    assert stats["repos_completed"] == 1
 
 
 @pytest.mark.anyio

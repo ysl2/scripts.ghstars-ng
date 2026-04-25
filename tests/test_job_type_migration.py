@@ -27,6 +27,38 @@ def test_alembic_revision_ids_fit_postgresql_version_column():
         assert len(module.revision) <= 32, migration_path.name
 
 
+def test_job_item_resume_progress_migration_creates_and_drops_table(tmp_path, monkeypatch):
+    engine = create_engine(f"sqlite:///{tmp_path / 'migration-resume-items.db'}")
+    module = _load_migration_module("0013_job_item_resume_progress.py")
+
+    with engine.begin() as connection:
+        connection.execute(text("CREATE TABLE jobs (id TEXT PRIMARY KEY)"))
+        operations = Operations(MigrationContext.configure(connection))
+        monkeypatch.setattr(module, "op", operations)
+
+        module.upgrade()
+
+        table_names = {
+            row.name
+            for row in connection.execute(text("SELECT name FROM sqlite_master WHERE type = 'table'")).mappings()
+        }
+        index_names = {
+            row.name
+            for row in connection.execute(text("SELECT name FROM sqlite_master WHERE type = 'index'")).mappings()
+        }
+        assert "job_item_resume_progress" in table_names
+        assert "ix_job_item_resume_progress_item" in index_names
+        assert "ix_job_item_resume_progress_source_job" in index_names
+
+        module.downgrade()
+
+        table_names_after = {
+            row.name
+            for row in connection.execute(text("SELECT name FROM sqlite_master WHERE type = 'table'")).mappings()
+        }
+        assert "job_item_resume_progress" not in table_names_after
+
+
 def test_sync_papers_postgresql_enum_rename_does_not_reupdate_old_labels(monkeypatch):
     module = _load_migration_module("0011_rename_sync_papers.py")
     executed_sql: list[str] = []

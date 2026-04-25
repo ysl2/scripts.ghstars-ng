@@ -8,8 +8,18 @@ from fastapi.testclient import TestClient
 from papertorepo.api.app import app, create_app
 from papertorepo.core.config import clear_settings_cache
 from papertorepo.db.session import session_scope
-from papertorepo.db.models import Job, JobAttemptMode, JobStatus, Paper, PaperRepoState, RepoStableStatus, utc_now
-from papertorepo.jobs.queue import claim_next_job, create_sync_papers_job, process_job
+from papertorepo.db.models import (
+    Job,
+    JobAttemptMode,
+    JobItemResumeProgress,
+    JobStatus,
+    JobType,
+    Paper,
+    PaperRepoState,
+    RepoStableStatus,
+    utc_now,
+)
+from papertorepo.jobs.queue import claim_next_job, create_job, create_sync_papers_job, process_job
 from papertorepo.api.schemas import ScopePayload
 
 
@@ -344,3 +354,42 @@ def test_same_scope_fresh_runs_remain_independent_in_attempt_history(db_env):
     latest_ids = [row["id"] for row in latest_jobs.json()]
     assert first.id in latest_ids
     assert second.id in latest_ids
+
+
+def test_public_job_detail_includes_item_resume_summary(db_env):
+    scope = ScopePayload(categories=["cs.CV"], month="2026-04")
+    with session_scope() as db:
+        failed = create_job(db, JobType.refresh_metadata, scope)
+        failed.status = JobStatus.failed
+        failed.finished_at = utc_now()
+        failed_id = failed.id
+        db.add(
+            JobItemResumeProgress(
+                attempt_series_key=failed.attempt_series_key,
+                job_type=JobType.refresh_metadata,
+                item_kind="repo",
+                item_key="https://github.com/foo/bar",
+                status="completed",
+                source_job_id=failed_id,
+            )
+        )
+        repair = create_job(
+            db,
+            JobType.refresh_metadata,
+            scope,
+            attempt_mode=JobAttemptMode.repair,
+            attempt_series_key=failed.attempt_series_key,
+        )
+        repair_id = repair.id
+
+    with TestClient(app) as client:
+        response = client.get(f"/api/v1/jobs/{repair_id}")
+
+    assert response.status_code == 200
+    resume = response.json()["repair_resume_json"]
+    assert resume["previous_job_id"] == failed_id
+    assert resume["resume_items"] == {
+        "total": 1,
+        "item_kind": "repo",
+        "by_status": {"completed": 1},
+    }

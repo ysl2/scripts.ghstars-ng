@@ -30,7 +30,15 @@ from papertorepo.jobs.ordering import (
     job_scope_window_sort_keys,
 )
 from papertorepo.jobs.stop import JobStopRequested, mark_job_cancelled, raise_if_job_stop_requested, request_job_stop
-from papertorepo.db.models import Job, JobAttemptMode, JobStatus, JobType, SyncPapersArxivRequestCheckpoint, utc_now
+from papertorepo.db.models import (
+    Job,
+    JobAttemptMode,
+    JobItemResumeProgress,
+    JobStatus,
+    JobType,
+    SyncPapersArxivRequestCheckpoint,
+    utc_now,
+)
 from papertorepo.core.scope import build_scope_json, build_scope_payload, build_dedupe_key
 from papertorepo.api.schemas import ChildSummary, JobRead, ScopePayload, validate_scope_for_job
 from papertorepo.services.pipeline import (
@@ -490,8 +498,16 @@ def _serialize_dt(value: object) -> str | None:
     return value.isoformat() if hasattr(value, "isoformat") else None
 
 
+def _resume_item_kind_for_job_type(job_type: JobType) -> str | None:
+    if job_type == JobType.find_repos:
+        return "paper"
+    if job_type == JobType.refresh_metadata:
+        return "repo"
+    return None
+
+
 def _repair_resume_json(db: Session, job: Job) -> dict[str, Any] | None:
-    if job.job_type != JobType.sync_papers or job.attempt_mode != JobAttemptMode.repair:
+    if job.attempt_mode != JobAttemptMode.repair:
         return None
 
     previous_attempt = db.scalar(
@@ -506,22 +522,7 @@ def _repair_resume_json(db: Session, job: Job) -> dict[str, Any] | None:
     if previous_attempt is None:
         return None
 
-    checkpoint_rows = list(
-        db.execute(
-            select(SyncPapersArxivRequestCheckpoint.surface, func.count(SyncPapersArxivRequestCheckpoint.id))
-            .where(SyncPapersArxivRequestCheckpoint.attempt_series_key == job.attempt_series_key)
-            .group_by(SyncPapersArxivRequestCheckpoint.surface)
-        ).all()
-    )
-    by_surface = {str(surface): int(count) for surface, count in checkpoint_rows}
-    checkpoint_window = db.execute(
-        select(
-            func.min(SyncPapersArxivRequestCheckpoint.created_at),
-            func.max(SyncPapersArxivRequestCheckpoint.updated_at),
-        ).where(SyncPapersArxivRequestCheckpoint.attempt_series_key == job.attempt_series_key)
-    ).one()
-
-    return {
+    payload: dict[str, Any] = {
         "previous_job_id": previous_attempt.id,
         "previous_status": previous_attempt.status.value,
         "previous_error_text": previous_attempt.error_text,
@@ -529,13 +530,51 @@ def _repair_resume_json(db: Session, job: Job) -> dict[str, Any] | None:
         "previous_started_at": _serialize_dt(previous_attempt.started_at),
         "previous_finished_at": _serialize_dt(previous_attempt.finished_at),
         "previous_stats_json": previous_attempt.stats_json,
-        "checkpoints": {
+    }
+    if job.job_type == JobType.sync_papers:
+        checkpoint_rows = list(
+            db.execute(
+                select(SyncPapersArxivRequestCheckpoint.surface, func.count(SyncPapersArxivRequestCheckpoint.id))
+                .where(SyncPapersArxivRequestCheckpoint.attempt_series_key == job.attempt_series_key)
+                .group_by(SyncPapersArxivRequestCheckpoint.surface)
+            ).all()
+        )
+        by_surface = {str(surface): int(count) for surface, count in checkpoint_rows}
+        checkpoint_window = db.execute(
+            select(
+                func.min(SyncPapersArxivRequestCheckpoint.created_at),
+                func.max(SyncPapersArxivRequestCheckpoint.updated_at),
+            ).where(SyncPapersArxivRequestCheckpoint.attempt_series_key == job.attempt_series_key)
+        ).one()
+        payload["checkpoints"] = {
             "total": sum(by_surface.values()),
             "by_surface": by_surface,
             "first_checkpoint_at": _serialize_dt(checkpoint_window[0]),
             "last_checkpoint_at": _serialize_dt(checkpoint_window[1]),
-        },
+        }
+        return payload
+
+    item_kind = _resume_item_kind_for_job_type(job.job_type)
+    if item_kind is None:
+        return None
+    item_rows = list(
+        db.execute(
+            select(JobItemResumeProgress.status, func.count(JobItemResumeProgress.id))
+            .where(
+                JobItemResumeProgress.attempt_series_key == job.attempt_series_key,
+                JobItemResumeProgress.job_type == job.job_type.value,
+                JobItemResumeProgress.item_kind == item_kind,
+            )
+            .group_by(JobItemResumeProgress.status)
+        ).all()
+    )
+    by_status = {str(status): int(count) for status, count in item_rows}
+    payload["resume_items"] = {
+        "total": sum(by_status.values()),
+        "item_kind": item_kind,
+        "by_status": by_status,
     }
+    return payload
 
 
 def _attempt_meta_subquery():
@@ -1024,9 +1063,25 @@ async def process_job(job_id: str) -> None:
             elif is_batch_root_job_type(job.job_type):
                 job.stats_json = await run_batch_root_job(db, job, progress=persist_progress, stop_check=stop_check)
             elif job.job_type == JobType.find_repos:
-                job.stats_json = await run_find_repos(db, job.scope_json, progress=persist_progress, stop_check=stop_check)
+                job.stats_json = await run_find_repos(
+                    db,
+                    job.scope_json,
+                    job_id=job.id,
+                    attempt_series_key=job.attempt_series_key,
+                    attempt_mode=job.attempt_mode,
+                    progress=persist_progress,
+                    stop_check=stop_check,
+                )
             elif job.job_type == JobType.refresh_metadata:
-                job.stats_json = await run_refresh_metadata(db, job.scope_json, progress=persist_progress, stop_check=stop_check)
+                job.stats_json = await run_refresh_metadata(
+                    db,
+                    job.scope_json,
+                    job_id=job.id,
+                    attempt_series_key=job.attempt_series_key,
+                    attempt_mode=job.attempt_mode,
+                    progress=persist_progress,
+                    stop_check=stop_check,
+                )
             elif job.job_type == JobType.export:
                 job.stats_json = run_export(db, job.scope_json, stop_check=stop_check)
             else:

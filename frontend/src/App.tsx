@@ -641,9 +641,13 @@ function repairResumeSummary(job: Job) {
   const checkpointJson = checkpoints && typeof checkpoints === 'object' && !Array.isArray(checkpoints) ? (checkpoints as Record<string, unknown>) : {}
   const bySurface = checkpointJson.by_surface
   const bySurfaceJson = bySurface && typeof bySurface === 'object' && !Array.isArray(bySurface) ? (bySurface as Record<string, unknown>) : {}
+  const resumeItems = resume.resume_items
+  const resumeItemsJson = resumeItems && typeof resumeItems === 'object' && !Array.isArray(resumeItems) ? (resumeItems as Record<string, unknown>) : {}
 
   const parts: string[] = []
   const totalCheckpoints = numericStat(checkpointJson, 'total')
+  const totalResumeItems = numericStat(resumeItemsJson, 'total')
+  const itemKind = typeof resumeItemsJson.item_kind === 'string' && resumeItemsJson.item_kind ? resumeItemsJson.item_kind : 'item'
   const listingCheckpoints = numericStat(bySurfaceJson, 'listing_html')
   const submittedDayCheckpoints = numericStat(bySurfaceJson, 'submitted_day_feed')
   const catchupCheckpoints = numericStat(bySurfaceJson, 'catchup_html')
@@ -660,6 +664,9 @@ function repairResumeSummary(job: Job) {
     if (catchupCheckpoints !== null && catchupCheckpoints > 0) checkpointParts.push(pluralize(catchupCheckpoints, 'catchup checkpoint'))
     if (metadataCheckpoints !== null && metadataCheckpoints > 0) checkpointParts.push(pluralize(metadataCheckpoints, 'metadata checkpoint'))
     parts.push(`${formatInteger(totalCheckpoints)} reusable checkpoints${checkpointParts.length > 0 ? ` (${checkpointParts.join(', ')})` : ''}`)
+  }
+  if (totalResumeItems !== null && totalResumeItems > 0) {
+    parts.push(pluralize(totalResumeItems, `completed ${itemKind}`))
   }
   if (previousPages !== null && previousPages > 0) parts.push(`${formatInteger(previousPages)} requests completed previously`)
   if (previousListingPages !== null && previousListingPages > 0) parts.push(pluralize(previousListingPages, 'listing page'))
