@@ -188,6 +188,53 @@ async def test_find_repos_marks_not_found_only_after_complete_lookup(db_env, mon
 
 
 @pytest.mark.anyio
+async def test_find_repos_alphaxiv_api_found_short_circuits_later_sources(db_env, monkeypatch):
+    insert_paper()
+    calls: list[str] = []
+
+    class FakeHuggingFaceClient:
+        def __init__(self, *_args, **_kwargs):
+            pass
+
+        async def fetch_paper_payload(self, _arxiv_id):
+            raise AssertionError("huggingface should be skipped after alphaxiv api finds a repo")
+
+    class FakeAlphaXivClient:
+        def __init__(self, *_args, **_kwargs):
+            pass
+
+        async def fetch_paper_payload(self, _arxiv_id):
+            calls.append("alphaxiv_api")
+            return (
+                200,
+                '{"paper":{"implementation":"https://github.com/foo/from-api"}}',
+                {"Content-Type": "application/json"},
+                None,
+            )
+
+        async def fetch_paper_html(self, _arxiv_id):
+            raise AssertionError("alphaxiv html should be skipped after alphaxiv api finds a repo")
+
+    monkeypatch.setattr("papertorepo.services.pipeline.HuggingFaceLinksClient", FakeHuggingFaceClient)
+    monkeypatch.setattr("papertorepo.services.pipeline.AlphaXivLinksClient", FakeAlphaXivClient)
+
+    with session_scope() as db:
+        stats = await run_find_repos(db, {"categories": ["cs.CV"], "month": "2026-04"})
+
+    assert calls == ["alphaxiv_api"]
+    assert stats["found"] == 1
+    assert stats["provider_counts"]["alphaxiv"]["api_requests"] == 1
+    assert stats["provider_counts"]["alphaxiv"]["html_requests"] == 0
+
+    with session_scope() as db:
+        state = db.get(PaperRepoState, "2604.12345")
+
+    assert state is not None
+    assert state.stable_status == RepoStableStatus.found
+    assert state.primary_repo_url == "https://github.com/foo/from-api"
+
+
+@pytest.mark.anyio
 async def test_find_repos_alphaxiv_api_404_continues_to_html_and_finds_repo(db_env, monkeypatch):
     insert_paper()
     calls: list[str] = []

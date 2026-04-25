@@ -1538,7 +1538,7 @@ async def _probe_huggingface(
     return observations, True, raw_fetches
 
 
-async def _probe_alphaxiv(
+async def _probe_alphaxiv_api(
     client: AlphaXivLinksClient,
     arxiv_id: str,
     metrics: dict[str, Any],
@@ -1547,7 +1547,6 @@ async def _probe_alphaxiv(
     raw_fetches: dict[str, RawFetchEnvelope] = {}
     provider_counts = metrics["provider_counts"]["alphaxiv"]
     stage_seconds = metrics["stage_seconds"]
-    complete = True
 
     started = time.perf_counter()
     payload_status, payload_body, payload_headers, payload_error = await client.fetch_paper_payload(arxiv_id)
@@ -1563,7 +1562,6 @@ async def _probe_alphaxiv(
         headers=payload_headers,
     )
     if payload_error and payload_status != 404:
-        complete = False
         provider_counts["api_failures"] += 1
         observations.append(
             {
@@ -1574,6 +1572,7 @@ async def _probe_alphaxiv(
                 "raw_fetch_ref": "alphaxiv_api",
             }
         )
+        return observations, False, raw_fetches
 
     payload_urls = extract_github_url_from_alphaxiv_payload(payload_body)
     if payload_urls:
@@ -1588,17 +1587,28 @@ async def _probe_alphaxiv(
                     "raw_fetch_ref": "alphaxiv_api",
                 }
             )
-        return observations, complete, raw_fetches
+        return observations, True, raw_fetches
 
-    if not (payload_error and payload_status != 404):
-        observations.append(
-            {
-                "provider": "alphaxiv",
-                "surface": "paper_api",
-                "status": ObservationStatus.checked_no_match,
-                "raw_fetch_ref": "alphaxiv_api",
-            }
-        )
+    observations.append(
+        {
+            "provider": "alphaxiv",
+            "surface": "paper_api",
+            "status": ObservationStatus.checked_no_match,
+            "raw_fetch_ref": "alphaxiv_api",
+        }
+    )
+    return observations, True, raw_fetches
+
+
+async def _probe_alphaxiv_html(
+    client: AlphaXivLinksClient,
+    arxiv_id: str,
+    metrics: dict[str, Any],
+) -> tuple[list[dict[str, Any]], bool, dict[str, RawFetchEnvelope]]:
+    observations: list[dict[str, Any]] = []
+    raw_fetches: dict[str, RawFetchEnvelope] = {}
+    provider_counts = metrics["provider_counts"]["alphaxiv"]
+    stage_seconds = metrics["stage_seconds"]
 
     started = time.perf_counter()
     html_status, html_body, html_headers, html_error = await client.fetch_paper_html(arxiv_id)
@@ -1648,7 +1658,7 @@ async def _probe_alphaxiv(
                 "raw_fetch_ref": "alphaxiv_html",
             }
         )
-    return observations, complete, raw_fetches
+    return observations, True, raw_fetches
 
 
 def _resolve_observation_raw_refs(
@@ -1762,15 +1772,29 @@ async def _lookup_links_for_paper(
 
     if not final_urls and settings.find_repos_alphaxiv_enabled:
         _run_stop_check(stop_check)
-        alphaxiv_observations, alphaxiv_complete, alphaxiv_raw_fetches = await _probe_alphaxiv(
+        alphaxiv_api_observations, alphaxiv_api_complete, alphaxiv_api_raw_fetches = await _probe_alphaxiv_api(
             alphaxiv_client,
             task.arxiv_id,
             metrics,
         )
-        observations.extend(alphaxiv_observations)
-        raw_fetches.update(alphaxiv_raw_fetches)
-        complete = complete and alphaxiv_complete
-        if not alphaxiv_complete:
+        observations.extend(alphaxiv_api_observations)
+        raw_fetches.update(alphaxiv_api_raw_fetches)
+        complete = complete and alphaxiv_api_complete
+        if not alphaxiv_api_complete and "AlphaXiv lookup incomplete" not in errors:
+            errors.append("AlphaXiv lookup incomplete")
+        final_urls = _finalize_repo_urls(observations)
+
+    if not final_urls and settings.find_repos_alphaxiv_enabled:
+        _run_stop_check(stop_check)
+        alphaxiv_html_observations, alphaxiv_html_complete, alphaxiv_html_raw_fetches = await _probe_alphaxiv_html(
+            alphaxiv_client,
+            task.arxiv_id,
+            metrics,
+        )
+        observations.extend(alphaxiv_html_observations)
+        raw_fetches.update(alphaxiv_html_raw_fetches)
+        complete = complete and alphaxiv_html_complete
+        if not alphaxiv_html_complete and "AlphaXiv lookup incomplete" not in errors:
             errors.append("AlphaXiv lookup incomplete")
         final_urls = _finalize_repo_urls(observations)
 
