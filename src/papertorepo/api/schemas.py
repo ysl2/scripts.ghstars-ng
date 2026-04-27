@@ -219,9 +219,15 @@ class PaperSummaryRead(BaseModel):
     categories_json: list[str]
     primary_category: str | None
     comment: str | None
+    journal_ref: str | None
     link_status: RepoStableStatus
     primary_github_url: str | None
     primary_github_stargazers_count: int | None
+    primary_github_language: str | None
+    primary_github_size_kb: int | None
+    primary_github_created_at: str | None
+    primary_github_pushed_at: str | None
+    primary_github_description: str | None
     stable_decided_at: datetime | None
     refresh_after: datetime | None
     last_attempt_at: datetime | None
@@ -232,7 +238,6 @@ class PaperSummaryRead(BaseModel):
 class PaperRead(PaperSummaryRead):
     abstract: str
     doi: str | None
-    journal_ref: str | None
     github_urls: list[str]
 
 

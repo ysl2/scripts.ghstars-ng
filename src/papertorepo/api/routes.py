@@ -67,7 +67,7 @@ def _scope_from_query(
     )
 
 
-def _paper_summary_payload(paper: Paper, *, primary_github_stargazers_count: int | None = None) -> dict[str, object]:
+def _paper_summary_payload(paper: Paper, *, primary_github_repo: GitHubRepo | None = None) -> dict[str, object]:
     state = paper.repo_state
     return {
         "arxiv_id": paper.arxiv_id,
@@ -79,9 +79,15 @@ def _paper_summary_payload(paper: Paper, *, primary_github_stargazers_count: int
         "categories_json": paper.categories_json or [],
         "primary_category": paper.primary_category,
         "comment": paper.comment,
+        "journal_ref": paper.journal_ref,
         "link_status": state.stable_status if state is not None else RepoStableStatus.unknown,
         "primary_github_url": state.primary_github_url if state is not None else None,
-        "primary_github_stargazers_count": primary_github_stargazers_count,
+        "primary_github_stargazers_count": primary_github_repo.stargazers_count if primary_github_repo is not None else None,
+        "primary_github_language": primary_github_repo.primary_language if primary_github_repo is not None else None,
+        "primary_github_size_kb": primary_github_repo.size_kb if primary_github_repo is not None else None,
+        "primary_github_created_at": primary_github_repo.created_at if primary_github_repo is not None else None,
+        "primary_github_pushed_at": primary_github_repo.pushed_at if primary_github_repo is not None else None,
+        "primary_github_description": primary_github_repo.description if primary_github_repo is not None else None,
         "stable_decided_at": state.stable_decided_at if state is not None else None,
         "refresh_after": state.refresh_after if state is not None else None,
         "last_attempt_at": state.last_attempt_at if state is not None else None,
@@ -90,19 +96,16 @@ def _paper_summary_payload(paper: Paper, *, primary_github_stargazers_count: int
     }
 
 
-def serialize_paper_summary(paper: Paper, *, primary_github_stargazers_count: int | None = None) -> PaperSummaryRead:
-    return PaperSummaryRead(
-        **_paper_summary_payload(paper, primary_github_stargazers_count=primary_github_stargazers_count)
-    )
+def serialize_paper_summary(paper: Paper, *, primary_github_repo: GitHubRepo | None = None) -> PaperSummaryRead:
+    return PaperSummaryRead(**_paper_summary_payload(paper, primary_github_repo=primary_github_repo))
 
 
-def serialize_paper(paper: Paper, *, primary_github_stargazers_count: int | None = None) -> PaperRead:
+def serialize_paper(paper: Paper, *, primary_github_repo: GitHubRepo | None = None) -> PaperRead:
     state = paper.repo_state
     return PaperRead(
-        **_paper_summary_payload(paper, primary_github_stargazers_count=primary_github_stargazers_count),
+        **_paper_summary_payload(paper, primary_github_repo=primary_github_repo),
         abstract=paper.abstract,
         doi=paper.doi,
-        journal_ref=paper.journal_ref,
         github_urls=state.github_urls_json if state is not None else [],
     )
 
@@ -265,17 +268,14 @@ def register_routes(app: FastAPI) -> None:
             for paper in papers
             if paper.repo_state is not None and paper.repo_state.primary_github_url is not None
         }
-        stargazers_by_url = dict(
-            db.execute(
-                select(GitHubRepo.github_url, GitHubRepo.stargazers_count).where(
-                    GitHubRepo.github_url.in_(primary_github_urls)
-                )
-            ).all()
-        )
+        repos_by_url = {
+            repo.github_url: repo
+            for repo in db.scalars(select(GitHubRepo).where(GitHubRepo.github_url.in_(primary_github_urls))).all()
+        }
         rows = [
             serialize_paper_summary(
                 paper,
-                primary_github_stargazers_count=stargazers_by_url.get(paper.repo_state.primary_github_url)
+                primary_github_repo=repos_by_url.get(paper.repo_state.primary_github_url)
                 if paper.repo_state is not None and paper.repo_state.primary_github_url is not None
                 else None,
             )
@@ -294,7 +294,7 @@ def register_routes(app: FastAPI) -> None:
         repo = db.get(GitHubRepo, primary_github_url) if primary_github_url is not None else None
         return serialize_paper(
             paper,
-            primary_github_stargazers_count=repo.stargazers_count if repo is not None else None,
+            primary_github_repo=repo,
         )
 
     @router.get("/repos", response_model=list[RepoRead])

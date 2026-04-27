@@ -41,6 +41,7 @@ def test_public_papers_returns_summary_rows(db_env):
                 authors_json=["Alice", "Bob"],
                 categories_json=["cs.CV"],
                 comment="CVPR 2026",
+                journal_ref="CVPR 2026",
                 primary_category="cs.CV",
                 source_first_seen_at=utc_now(),
                 source_last_seen_at=utc_now(),
@@ -65,6 +66,8 @@ def test_public_papers_returns_summary_rows(db_env):
                 github_id=123,
                 name_with_owner="example/project",
                 stargazers_count=321,
+                size_kb=1536,
+                primary_language="TypeScript",
                 created_at="2020-01-01T00:00:00Z",
                 description="example project",
                 homepage=None,
@@ -87,13 +90,19 @@ def test_public_papers_returns_summary_rows(db_env):
     assert row["title"] == "Bidirectional Cross-Modal Prompting"
     assert row["primary_github_url"] == "https://github.com/example/project"
     assert row["primary_github_stargazers_count"] == 321
+    assert row["primary_github_language"] == "TypeScript"
+    assert row["primary_github_size_kb"] == 1536
+    assert row["primary_github_created_at"] == "2020-01-01T00:00:00Z"
+    assert row["primary_github_pushed_at"] == "2026-04-18T00:00:00Z"
+    assert row["primary_github_description"] == "example project"
     assert row["link_status"] == "found"
     assert "abstract" not in row
     assert row["comment"] == "CVPR 2026"
+    assert row["journal_ref"] == "CVPR 2026"
     assert "github_urls" not in row
 
 
-def test_public_papers_returns_null_primary_github_stargazers_count_without_metadata(db_env):
+def test_public_papers_returns_null_primary_github_metadata_without_metadata(db_env):
     with session_scope() as db:
         db.add(
             Paper(
@@ -106,6 +115,7 @@ def test_public_papers_returns_null_primary_github_stargazers_count_without_meta
                 authors_json=["Alice"],
                 categories_json=["cs.CV"],
                 comment=None,
+                journal_ref="NeurIPS 2026",
                 primary_category="cs.CV",
                 source_first_seen_at=utc_now(),
                 source_last_seen_at=utc_now(),
@@ -132,6 +142,12 @@ def test_public_papers_returns_null_primary_github_stargazers_count_without_meta
     row = response.json()[0]
     assert row["primary_github_url"] == "https://github.com/missing/project"
     assert row["primary_github_stargazers_count"] is None
+    assert row["primary_github_language"] is None
+    assert row["primary_github_size_kb"] is None
+    assert row["primary_github_created_at"] is None
+    assert row["primary_github_pushed_at"] is None
+    assert row["primary_github_description"] is None
+    assert row["journal_ref"] == "NeurIPS 2026"
 
 
 def test_public_repos_returns_common_github_metadata_only(db_env):
@@ -209,6 +225,30 @@ def test_public_papers_supports_offset_paging(db_env):
                     source_last_seen_at=utc_now(),
                 )
             )
+        db.add(
+            PaperRepoState(
+                arxiv_id="2604.20001",
+                stable_status=RepoStableStatus.found,
+                primary_github_url="https://github.com/example/page-two",
+                github_urls_json=["https://github.com/example/page-two"],
+                stable_decided_at=utc_now(),
+                refresh_after=utc_now(),
+                last_attempt_at=utc_now(),
+                last_attempt_complete=True,
+                last_attempt_error=None,
+            )
+        )
+        db.add(
+            GitHubRepo(
+                github_url="https://github.com/example/page-two",
+                stargazers_count=42,
+                size_kb=2048,
+                primary_language="Python",
+                created_at="2021-02-03T00:00:00Z",
+                pushed_at="2026-04-20T00:00:00Z",
+                description="second page repo",
+            )
+        )
 
     with TestClient(app) as client:
         first_page = client.get("/api/v1/papers?limit=2&offset=0")
@@ -222,6 +262,12 @@ def test_public_papers_supports_offset_paging(db_env):
 
     assert first_ids == ["2604.20003", "2604.20002"]
     assert second_ids == ["2604.20001"]
+    assert second_page.json()[0]["primary_github_stargazers_count"] == 42
+    assert second_page.json()[0]["primary_github_language"] == "Python"
+    assert second_page.json()[0]["primary_github_size_kb"] == 2048
+    assert second_page.json()[0]["primary_github_created_at"] == "2021-02-03T00:00:00Z"
+    assert second_page.json()[0]["primary_github_pushed_at"] == "2026-04-20T00:00:00Z"
+    assert second_page.json()[0]["primary_github_description"] == "second page repo"
 
 
 def test_public_paper_detail_returns_full_payload(db_env):

@@ -124,9 +124,15 @@ type PaperSummary = {
   categories_json: string[]
   primary_category: string | null
   comment: string | null
+  journal_ref: string | null
   link_status: LinkStatus
   primary_github_url: string | null
   primary_github_stargazers_count: number | null
+  primary_github_language: string | null
+  primary_github_size_kb: number | null
+  primary_github_created_at: string | null
+  primary_github_pushed_at: string | null
+  primary_github_description: string | null
   stable_decided_at: string | null
   refresh_after: string | null
   last_attempt_at: string | null
@@ -137,7 +143,6 @@ type PaperSummary = {
 type PaperDetail = PaperSummary & {
   abstract: string
   doi: string | null
-  journal_ref: string | null
   github_urls: string[]
 }
 
@@ -1015,6 +1020,25 @@ function repoLabel(url: string) {
   } catch {
     return url
   }
+}
+
+function formatAuthorLabel(authors: string[]) {
+  const visibleAuthors = authors.slice(0, 3).join(', ')
+  if (authors.length <= 3) return visibleAuthors
+  return `${visibleAuthors} et al.`
+}
+
+function formatRepoSize(sizeKb: number | null | undefined) {
+  if (typeof sizeKb !== 'number' || !Number.isFinite(sizeKb)) return '—'
+  const units = ['KB', 'MB', 'GB']
+  let value = sizeKb
+  let unitIndex = 0
+  while (value >= 1024 && unitIndex < units.length - 1) {
+    value /= 1024
+    unitIndex += 1
+  }
+  const formatted = Number.isInteger(value) ? String(value) : value.toFixed(2).replace(/\.?0+$/, '')
+  return `${formatted} ${units[unitIndex]}`
 }
 
 function statusCellClass(value: unknown) {
@@ -2331,27 +2355,19 @@ function App() {
           link_status: paper.link_status,
           arxiv_id: paper.arxiv_id,
           title: paper.title,
-          authors: paper.authors_json.join(', '),
+          author_label: formatAuthorLabel(paper.authors_json),
           categories: paper.categories_json,
           categories_label: paper.categories_json.join(', ') || paper.primary_category || '',
           published_at: paper.published_at || '',
-          updated_at: paper.updated_at || '',
           comment: paper.comment || '',
+          journal_ref: paper.journal_ref || '',
           repo_label: paper.primary_github_url ? repoLabel(paper.primary_github_url) : '',
-          repo_url: paper.primary_github_url || '',
           repo_stars: paper.primary_github_stargazers_count,
-          refresh_after: paper.refresh_after || '',
-          search_blob: [
-            paper.arxiv_id,
-            paper.title,
-            paper.authors_json.join(' '),
-            paper.categories_json.join(' '),
-            paper.primary_category || '',
-            paper.comment || '',
-            paper.primary_github_url || '',
-          ]
-            .join(' ')
-            .trim(),
+          repo_language: paper.primary_github_language || '',
+          repo_size_kb: paper.primary_github_size_kb,
+          repo_created_at: paper.primary_github_created_at || '',
+          repo_pushed_at: paper.primary_github_pushed_at || '',
+          repo_description: paper.primary_github_description || '',
         }
       }),
     [papers],
@@ -2508,11 +2524,11 @@ function App() {
       },
       {
         field: 'arxiv_id',
-        headerName: 'ArXiv ID',
-        width: columnWidth('ArXiv ID', 130),
+        headerName: 'ID',
+        width: columnWidth('ID', 126),
         cellClass: 'mono-cell',
       },
-      { field: 'title', headerName: 'Title', width: columnWidth('Title', 440) },
+      { field: 'title', headerName: 'Title', width: columnWidth('Title', 460) },
       {
         field: 'categories_label',
         headerName: 'Category',
@@ -2536,14 +2552,6 @@ function App() {
         filterParams: compactDateFilterParams,
         valueFormatter: (params) => formatDate(String(params.value || '')),
       },
-      {
-        field: 'updated_at',
-        headerName: 'Updated',
-        width: columnWidth('Updated', 132),
-        filter: compactDateColumnFilter,
-        filterParams: compactDateFilterParams,
-        valueFormatter: (params) => formatDate(String(params.value || '')),
-      },
       { field: 'repo_label', headerName: 'Repo', width: columnWidth('Repo', 220), cellClass: 'mono-cell' },
       {
         field: 'repo_stars',
@@ -2554,24 +2562,41 @@ function App() {
         cellClass: 'number-cell',
       },
       {
-        field: 'refresh_after',
-        headerName: 'Refresh After',
-        width: columnWidth('Refresh After', 182),
+        field: 'repo_language',
+        headerName: 'Language',
+        width: columnWidth('Language', 148),
+        filter: compactValueColumnFilter,
+        filterParams: createCompactSetFilterParams(),
+      },
+      {
+        field: 'repo_size_kb',
+        headerName: 'Size',
+        width: columnWidth('Size', 118),
+        filter: compactNumberColumnFilter,
+        filterParams: compactNumberFilterParams,
+        valueFormatter: (params) => formatRepoSize(typeof params.value === 'number' ? params.value : null),
+        cellClass: 'number-cell',
+      },
+      {
+        field: 'repo_created_at',
+        headerName: 'Created',
+        width: columnWidth('Created', 146),
         filter: compactDateColumnFilter,
         filterParams: compactDateFilterParams,
-        valueFormatter: (params) => formatTime(String(params.value || '')),
+        valueFormatter: (params) => formatDate(String(params.value || '')),
       },
-      { field: 'comment', headerName: 'Comment', width: columnWidth('Comment', 280), hide: true },
-      { field: 'authors', headerName: 'Authors', width: columnWidth('Authors', 320), hide: true },
-      { field: 'repo_url', headerName: 'Repo URL', width: columnWidth('Repo URL', 320), hide: true, cellClass: 'mono-cell' },
       {
-        field: 'search_blob',
-        headerName: 'Search Blob',
-        hide: true,
-        hideable: false,
-        sortable: false,
-        filter: false,
+        field: 'repo_pushed_at',
+        headerName: 'Pushed',
+        width: columnWidth('Pushed', 146),
+        filter: compactDateColumnFilter,
+        filterParams: compactDateFilterParams,
+        valueFormatter: (params) => formatDate(String(params.value || '')),
       },
+      { field: 'journal_ref', headerName: 'Journal Ref', width: columnWidth('Journal Ref', 190) },
+      { field: 'comment', headerName: 'Comment', width: columnWidth('Comment', 280) },
+      { field: 'repo_description', headerName: 'Description', width: columnWidth('Description', 360) },
+      { field: 'author_label', headerName: 'Author', width: columnWidth('Author', 280) },
     ],
     [],
   )
@@ -3488,7 +3513,7 @@ function App() {
         onSelectedKeyChange={setSelectedPaperId}
         onDisplayedKeysChange={handleDisplayedKeysChange}
         quickSearch={deferredTableSearch}
-        persistenceId="papertorepo-papers"
+        persistenceId="papertorepo-papers-v2"
         emptyMessage="No papers are stored yet."
         toolbarLeading={sheetToolbarLeading}
         toolbarActions={sheetToolbarActions}
