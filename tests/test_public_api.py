@@ -69,6 +69,7 @@ def test_public_papers_returns_summary_rows(db_env):
                 size_kb=1536,
                 primary_language="TypeScript",
                 created_at="2020-01-01T00:00:00Z",
+                updated_at="2026-04-19T00:00:00Z",
                 description="example project",
                 homepage=None,
                 topic=None,
@@ -94,6 +95,7 @@ def test_public_papers_returns_summary_rows(db_env):
     assert row["primary_github_size_kb"] == 1536
     assert row["primary_github_created_at"] == "2020-01-01T00:00:00Z"
     assert row["primary_github_pushed_at"] == "2026-04-18T00:00:00Z"
+    assert row["primary_github_updated_at"] == "2026-04-19T00:00:00Z"
     assert row["primary_github_description"] == "example project"
     assert row["link_status"] == "found"
     assert "abstract" not in row
@@ -146,6 +148,7 @@ def test_public_papers_returns_null_primary_github_metadata_without_metadata(db_
     assert row["primary_github_size_kb"] is None
     assert row["primary_github_created_at"] is None
     assert row["primary_github_pushed_at"] is None
+    assert row["primary_github_updated_at"] is None
     assert row["primary_github_description"] is None
     assert row["journal_ref"] == "NeurIPS 2026"
 
@@ -246,6 +249,7 @@ def test_public_papers_supports_offset_paging(db_env):
                 primary_language="Python",
                 created_at="2021-02-03T00:00:00Z",
                 pushed_at="2026-04-20T00:00:00Z",
+                updated_at="2026-04-21T00:00:00Z",
                 description="second page repo",
             )
         )
@@ -267,6 +271,7 @@ def test_public_papers_supports_offset_paging(db_env):
     assert second_page.json()[0]["primary_github_size_kb"] == 2048
     assert second_page.json()[0]["primary_github_created_at"] == "2021-02-03T00:00:00Z"
     assert second_page.json()[0]["primary_github_pushed_at"] == "2026-04-20T00:00:00Z"
+    assert second_page.json()[0]["primary_github_updated_at"] == "2026-04-21T00:00:00Z"
     assert second_page.json()[0]["primary_github_description"] == "second page repo"
 
 

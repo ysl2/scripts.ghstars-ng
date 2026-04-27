@@ -132,6 +132,7 @@ type PaperSummary = {
   primary_github_size_kb: number | null
   primary_github_created_at: string | null
   primary_github_pushed_at: string | null
+  primary_github_updated_at: string | null
   primary_github_description: string | null
   stable_decided_at: string | null
   refresh_after: string | null
@@ -2372,6 +2373,7 @@ function App() {
           repo_size_kb: paper.primary_github_size_kb,
           repo_created_at: paper.primary_github_created_at || '',
           repo_pushed_at: paper.primary_github_pushed_at || '',
+          repo_updated_at: paper.primary_github_updated_at || '',
           repo_description: paper.primary_github_description || '',
         }
       }),
@@ -2598,8 +2600,16 @@ function App() {
         filterParams: compactDateFilterParams,
         valueFormatter: (params) => formatPaperTableDate(String(params.value || '')),
       },
-      { field: 'journal_ref', headerName: 'Journal Ref', width: columnWidth('Journal Ref', 190) },
+      {
+        field: 'repo_updated_at',
+        headerName: 'Updated',
+        width: columnWidth('Updated', 146),
+        filter: compactDateColumnFilter,
+        filterParams: compactDateFilterParams,
+        valueFormatter: (params) => formatPaperTableDate(String(params.value || '')),
+      },
       { field: 'comment', headerName: 'Comment', width: columnWidth('Comment', 280) },
+      { field: 'journal_ref', headerName: 'Journal Ref', width: columnWidth('Journal Ref', 190) },
       { field: 'repo_description', headerName: 'Description', width: columnWidth('Description', 360) },
       { field: 'author_label', headerName: 'Author', width: columnWidth('Author', 280) },
     ],
@@ -3518,7 +3528,7 @@ function App() {
         onSelectedKeyChange={setSelectedPaperId}
         onDisplayedKeysChange={handleDisplayedKeysChange}
         quickSearch={deferredTableSearch}
-        persistenceId="papertorepo-papers-v2"
+        persistenceId="papertorepo-papers-v3"
         emptyMessage="No papers are stored yet."
         toolbarLeading={sheetToolbarLeading}
         toolbarActions={sheetToolbarActions}

@@ -87,6 +87,7 @@ def _paper_summary_payload(paper: Paper, *, primary_github_repo: GitHubRepo | No
         "primary_github_size_kb": primary_github_repo.size_kb if primary_github_repo is not None else None,
         "primary_github_created_at": primary_github_repo.created_at if primary_github_repo is not None else None,
         "primary_github_pushed_at": primary_github_repo.pushed_at if primary_github_repo is not None else None,
+        "primary_github_updated_at": primary_github_repo.updated_at if primary_github_repo is not None else None,
         "primary_github_description": primary_github_repo.description if primary_github_repo is not None else None,
         "stable_decided_at": state.stable_decided_at if state is not None else None,
         "refresh_after": state.refresh_after if state is not None else None,

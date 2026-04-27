@@ -227,6 +227,7 @@ class PaperSummaryRead(BaseModel):
     primary_github_size_kb: int | None
     primary_github_created_at: str | None
     primary_github_pushed_at: str | None
+    primary_github_updated_at: str | None
     primary_github_description: str | None
     stable_decided_at: datetime | None
     refresh_after: datetime | None
