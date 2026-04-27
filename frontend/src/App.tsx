@@ -2530,12 +2530,6 @@ function App() {
         cellClass: (params) => statusCellClass(params.value),
       },
       {
-        field: 'arxiv_id',
-        headerName: 'ID',
-        width: columnWidth('ID', 126),
-        cellClass: 'mono-cell',
-      },
-      {
         field: 'categories_label',
         headerName: 'Category',
         width: columnWidth('Category', 220),
@@ -2549,6 +2543,12 @@ function App() {
               : [],
           searchPlaceholder: 'Search categories',
         }),
+      },
+      {
+        field: 'arxiv_id',
+        headerName: 'ID',
+        width: columnWidth('ID', 126),
+        cellClass: 'mono-cell',
       },
       { field: 'title', headerName: 'Title', width: columnWidth('Title', 460) },
       {
@@ -3528,7 +3528,7 @@ function App() {
         onSelectedKeyChange={setSelectedPaperId}
         onDisplayedKeysChange={handleDisplayedKeysChange}
         quickSearch={deferredTableSearch}
-        persistenceId="papertorepo-papers-v7"
+        persistenceId="papertorepo-papers-v8"
         emptyMessage="No papers are stored yet."
         toolbarLeading={sheetToolbarLeading}
         toolbarActions={sheetToolbarActions}
