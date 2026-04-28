@@ -276,6 +276,7 @@ const DATE_PATTERN = /^\d{4}-(0[1-9]|1[0-2])-(0[1-9]|[12]\d|3[01])$/
 const ARXIV_CATEGORY_PATTERN = /^[a-z]+(?:-[a-z]+)*(?:\.[A-Za-z-]+)?$/
 const CATEGORIES_HINT = 'cs.CV, cs.LG'
 const RANGE_ORDER_HINT = 'From ≤ To'
+const COPY_FEEDBACK_MS = 500
 
 function toDateInputValue(value: Date) {
   const year = value.getFullYear()
@@ -296,6 +297,34 @@ function addDays(value: Date, delta: number) {
 
 function hasTypedValue(value: string | null | undefined) {
   return typeof value === 'string' && value.trim().length > 0
+}
+
+async function copyText(value: string) {
+  if (navigator.clipboard?.writeText) {
+    try {
+      await navigator.clipboard.writeText(value)
+      return
+    } catch {
+      // Fall back for browsers that expose Clipboard API but deny it outside secure contexts.
+    }
+  }
+
+  const textArea = document.createElement('textarea')
+  textArea.value = value
+  textArea.setAttribute('readonly', '')
+  textArea.style.position = 'fixed'
+  textArea.style.left = '-9999px'
+  textArea.style.top = '0'
+  document.body.appendChild(textArea)
+  try {
+    textArea.select()
+    const copied = document.execCommand('copy')
+    if (!copied) {
+      throw new Error('Clipboard write failed')
+    }
+  } finally {
+    document.body.removeChild(textArea)
+  }
 }
 
 function categoriesValidationMessage(value: string | null | undefined) {
@@ -1547,6 +1576,7 @@ function App() {
   const [rerunningJobId, setRerunningJobId] = useState<string | null>(null)
   const [stoppingJobIds, setStoppingJobIds] = useState<string[]>([])
   const [error, setError] = useState<string | null>(null)
+  const [copyFeedback, setCopyFeedback] = useState<string | null>(null)
   const [summaryRefreshTick, setSummaryRefreshTick] = useState(0)
   const [jobsRefreshTick, setJobsRefreshTick] = useState(0)
   const [tableRefreshTick, setTableRefreshTick] = useState(0)
@@ -1573,6 +1603,7 @@ function App() {
   const childJobAbortControllersRef = useRef<Map<string, AbortController>>(new Map())
   const historyAbortControllersRef = useRef<Map<string, AbortController>>(new Map())
   const queueHandoffTimeoutRef = useRef<number | null>(null)
+  const copyFeedbackTimeoutRef = useRef<number | null>(null)
   const selectedJobDetailHydratedJobIdRef = useRef<string | null>(null)
   const selectedJobChildrenHydratedJobIdRef = useRef<string | null>(null)
   const selectedJobAttemptsHydratedJobIdRef = useRef<string | null>(null)
@@ -1624,6 +1655,29 @@ function App() {
   const filteredPaperIds = previewTab === 'papers' ? visibleKeys : []
   const filteredPaperExportReady = previewTab === 'papers' && filteredPaperIds.length > 0
 
+  const showCopyFeedback = useCallback((message: string) => {
+    if (copyFeedbackTimeoutRef.current !== null) {
+      window.clearTimeout(copyFeedbackTimeoutRef.current)
+    }
+    setCopyFeedback(message)
+    copyFeedbackTimeoutRef.current = window.setTimeout(() => {
+      setCopyFeedback(null)
+      copyFeedbackTimeoutRef.current = null
+    }, COPY_FEEDBACK_MS)
+  }, [])
+
+  const handleCopyText = useCallback(
+    async (value: string, label: string) => {
+      try {
+        await copyText(value)
+        showCopyFeedback(`${label} copied`)
+      } catch {
+        showCopyFeedback(`Could not copy ${label}`)
+      }
+    },
+    [showCopyFeedback],
+  )
+
   const runDisabledReason = useCallback(
     (jobType: 'sync-papers' | 'find-repos' | 'refresh-metadata', title: string) => {
       if (launchingJob === jobType) {
@@ -1645,6 +1699,14 @@ function App() {
       exportMenuRef.current.open = false
     }
   })
+
+  useEffect(() => {
+    return () => {
+      if (copyFeedbackTimeoutRef.current !== null) {
+        window.clearTimeout(copyFeedbackTimeoutRef.current)
+      }
+    }
+  }, [])
 
   useEffect(() => {
     let cancelled = false
@@ -3088,8 +3150,28 @@ function App() {
         <div className="drawer-content">
           <div className="drawer-header">
             <div>
-              <p className="panel-kicker">Paper details</p>
-              <h3>{selectedPaper.title}</h3>
+              <p className="panel-kicker">
+                <button
+                  type="button"
+                  className="copy-text-button paper-id-copy"
+                  onClick={() => handleCopyText(selectedPaper.arxiv_id, 'ID')}
+                  aria-label={`Copy arXiv ID ${selectedPaper.arxiv_id}`}
+                  title="Copy arXiv ID"
+                >
+                  {selectedPaper.arxiv_id}
+                </button>
+              </p>
+              <h3>
+                <button
+                  type="button"
+                  className="copy-text-button title-copy"
+                  onClick={() => handleCopyText(selectedPaper.title, 'Title')}
+                  aria-label="Copy paper title"
+                  title="Copy title"
+                >
+                  {selectedPaper.title}
+                </button>
+              </h3>
             </div>
             <button type="button" className="ghost-button" onClick={closeDrawer}>
               Close
@@ -3772,6 +3854,11 @@ function App() {
       {drawerOpen ? (
         <aside ref={drawerPanelRef} className="drawer-panel" role="complementary" aria-label={`${previewTab} details`}>
           {renderDrawerContent()}
+          {copyFeedback ? (
+            <div className="copy-toast" role="status" aria-live="polite">
+              {copyFeedback}
+            </div>
+          ) : null}
         </aside>
       ) : null}
     </main>

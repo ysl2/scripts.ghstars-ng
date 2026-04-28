@@ -2338,6 +2338,35 @@ summary:focus {
   line-height: 1.1;
 }
 
+.copy-text-button {
+  display: inline;
+  margin: 0;
+  padding: 0;
+  border: none;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  line-height: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.copy-text-button:hover {
+  color: var(--accent);
+}
+
+.copy-text-button:focus-visible {
+  border-radius: 8px;
+  outline: 2px solid rgba(26, 91, 71, 0.2);
+  outline-offset: 4px;
+}
+
+.paper-id-copy {
+  font-family: var(--mono);
+  letter-spacing: 0.04em;
+  text-transform: none;
+}
+
 .detail-block {
   display: grid;
   gap: 8px;
@@ -2450,6 +2479,41 @@ summary:focus {
   min-height: 38px;
   padding: 0 14px;
   border-radius: 999px;
+}
+
+.copy-toast {
+  position: absolute;
+  top: 70px;
+  right: 22px;
+  z-index: 96;
+  padding: 9px 13px;
+  border: 1px solid rgba(34, 96, 74, 0.16);
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.96);
+  color: #1f624c;
+  box-shadow: 0 16px 38px rgba(20, 27, 24, 0.16);
+  font-size: 12px;
+  font-weight: 700;
+  pointer-events: none;
+  animation: copy-toast-pop 500ms ease forwards;
+}
+
+@keyframes copy-toast-pop {
+  0% {
+    opacity: 0;
+    transform: translateY(-6px) scale(0.98);
+  }
+
+  18%,
+  72% {
+    opacity: 1;
+    transform: translateY(0) scale(1);
+  }
+
+  100% {
+    opacity: 0;
+    transform: translateY(-4px) scale(0.98);
+  }
 }
 
 .status-tag.found,
